@@ -1365,7 +1365,7 @@ export class SubagentFleetComponent implements Component {
 				? wrapFleetDetailLine(line, width).map(style)
 				: wrapTextWithAnsi(style(line), Math.max(1, width));
 			lines.push(...(wrapped.length ? wrapped : [""]));
-			if (/^(?:Transcript|Result transcript tail|Preview)$/.test(line)
+			if (/^(?:Transcript|Result transcript tail|Preview|Recent output from status\.json:)$/.test(line)
 				|| /^(?:Transcript|Session transcript|External stderr|External stdout) tail(?: from .*)?(?: \(tail truncated\))?:$/.test(line)) inBody = true;
 		}
 		return { header: [], body: this.withActionLines(lines) };

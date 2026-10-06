@@ -55,6 +55,7 @@ function writeAsyncRun(root: string, input: {
 	models?: string[];
 	thinking?: string[];
 	output?: string;
+	recentOutput?: string[];
 	transcript?: Array<Record<string, unknown>>;
 }): string {
 	const asyncDir = path.join(root, input.id);
@@ -74,6 +75,7 @@ function writeAsyncRun(root: string, input: {
 		currentStep: 0,
 		steps: agents.map((agent, index) => ({
 			agent,
+			...(input.recentOutput ? { recentOutput: input.recentOutput } : {}),
 			...(input.contexts?.[index] ? { context: input.contexts[index] } : {}),
 			...(input.models?.[index] ? { model: input.models[index] } : {}),
 			...(input.thinking?.[index] ? { thinking: input.thinking[index] } : {}),
@@ -1155,6 +1157,26 @@ describe("native subagent fleet", () => {
 					"  unsafe [U+001B][31m text",
 				]);
 			}
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
+	it("keeps recentOutput fallback prefix-looking body on ordinary SDK wrapping", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-recent-output-body-"));
+		try {
+			const recentOutput = ["Output", "Session", "Events", "Log", "Result"].map((label) => `${label}: /${"z".repeat(53)}/ordinary-status-body-${label}.md`);
+			const asyncDir = writeAsyncRun(root, { id: "recent-output-body", recentOutput });
+			const component = new SubagentFleetComponent(
+				{ terminal: { rows: 32, columns: 100 }, requestRender() {} } as never,
+				theme as never, stateForTest(), () => {}, { asyncDirRoot: root, refreshMs: 60_000 },
+			);
+			try {
+				const { rows, screens } = collectPlainFleetRows(component);
+				const expected = recentOutput.flatMap((line) => wrapTextWithAnsi(`  ${line}`, 61));
+				console.log("FLEET B1 RECENT OUTPUT EVIDENCE", JSON.stringify({ asyncDir, statusPath: path.join(asyncDir, "status.json"), recentOutput, rows, screens, expected }));
+				const header = rows.indexOf("Recent output from status.json:");
+				assert.ok(header >= 0, "must exercise the recentOutput fallback producer");
+				assert.deepEqual(rows.slice(header + 1), expected);
+			} finally { component.dispose(); }
 		} finally { fs.rmSync(root, { recursive: true, force: true }); }
 	});
 
