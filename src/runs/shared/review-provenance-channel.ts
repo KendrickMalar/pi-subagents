@@ -1,5 +1,8 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, readSync, writeSync } from "node:fs";
+import { createReadStream, fstatSync } from "node:fs";
+import { Socket } from "node:net";
+import { ChildProcess } from "node:child_process";
+import { Writable, type Readable } from "node:stream";
 import { isAbsolute, normalize, parse } from "node:path";
 
 export interface ReviewLaunchIdentityV1 {
@@ -61,17 +64,86 @@ export function decodeReviewTerminal(bytes: Uint8Array): ReviewTerminalEnvelopeV
 	return value;
 }
 
-/** Internal trusted host primitive. Secret material exists only in these closures and the private FD frame. */
-export function createLaunchChannel(value: ReviewLaunchIdentityV1) {
+declare const readerBrand: unique symbol;
+declare const writerBrand: unique symbol;
+export type ReviewReaderHandle = Readonly<{ [readerBrand]: true }>;
+export type ReviewWriterHandle = Readonly<{ [writerBrand]: true }>;
+export interface ReviewChannelDiagnostic { readonly readCount: number; readonly length: number; readonly elapsedMs: number; readonly eof: boolean }
+const resourceAccess = new WeakMap<object, { takeReader(handle: unknown): boolean; takeWriter(handle: unknown): Writable | undefined }>();
+function object(value: unknown): value is object { return value !== null && typeof value === "object"; }
+function boundedDeadline(deadline: number): number | undefined {
+	const now = Date.now();
+	return Number.isFinite(deadline) && deadline > now ? Math.min(deadline, now + 1000) : undefined;
+}
+/** Internal only: declarations originate at trusted bootstrap / actual spawn, never caller JSON.
+ * The marker is routing, NOT cryptographic authority. Product bootstrap wiring is a later slice.
+ */
+export function createReviewChannelResources() {
+	const readers = new WeakMap<object, true>(); const writers = new WeakMap<object, Writable>();
+	const registered = new WeakSet<object>(); let declared = false;
+	const resources = Object.freeze({
+		registerBootstrapReader(): ReviewReaderHandle | undefined {
+			if (declared) return undefined; declared = true;
+			const marker = process.env.PI_SUBAGENT_REVIEW_CHANNEL_V1;
+			delete process.env.PI_SUBAGENT_REVIEW_CHANNEL_V1;
+			if (marker !== "fd3") return undefined;
+			try { if (!fstatSync(3).isSocket()) return undefined; } catch { return undefined; }
+			const handle = Object.freeze({}) as ReviewReaderHandle; readers.set(handle, true); return handle;
+		},
+		registerSpawnWriter(child: ChildProcess): ReviewWriterHandle | undefined {
+			if (!(child instanceof ChildProcess) || !Number.isSafeInteger(child.pid) || !Array.isArray(child.stdio)) return undefined;
+			const stream = child.stdio[3];
+			if (!(stream instanceof Writable) || stream.destroyed || !stream.writable || child.stdio.slice(0, 3).includes(stream) || registered.has(stream)) return undefined;
+			registered.add(stream);
+			const handle = Object.freeze({}) as ReviewWriterHandle; writers.set(handle, stream); return handle;
+		},
+	});
+	resourceAccess.set(resources, {
+		takeReader(handle) { if (!object(handle) || !readers.has(handle)) return false; readers.delete(handle); return true; },
+		takeWriter(handle) { if (!object(handle)) return undefined; const stream = writers.get(handle); if (stream) writers.delete(handle); return stream; },
+	});
+	return resources;
+}
+export type ReviewChannelResources = ReturnType<typeof createReviewChannelResources>;
+
+/** Close is acknowledged by the owned stream's event/state, not by a numeric FD fallback. */
+function closeOwned(stream: Readable | Writable): Promise<boolean> {
+	if (stream.closed) return Promise.resolve(true);
+	return new Promise(resolve => {
+		const timer = setTimeout(() => { stream.removeListener("close", closed); resolve(false); }, 1000);
+		function closed() { clearTimeout(timer); resolve(stream.closed); }
+		stream.once("close", closed); if (!stream.destroyed) stream.destroy();
+	});
+}
+
+/** Internal trusted host primitive. Secrets stay in closures and the dedicated in-memory pipe. */
+export function createLaunchChannel(value: ReviewLaunchIdentityV1, resources: ReviewChannelResources) {
 	const launch = identity(value); const key = randomBytes(32); let transferred = false;
 	return Object.freeze({
-		writeInitialToFd(fd: number): void {
+		async writeInitial(handle: ReviewWriterHandle, absoluteDeadline: number): Promise<void> {
+			if (transferred) return invalid();
+			const deadline = boundedDeadline(absoluteDeadline); if (deadline === undefined) return invalid();
+			const stream = resourceAccess.get(resources)?.takeWriter(handle); if (!stream) return invalid();
+			transferred = true;
+			let frame: Buffer | undefined; let completed = false;
 			try {
-				if (transferred) return invalid(); transferred = true;
-				const frame = encode({ version: 1, identity: launch, key: key.toString("hex") }, 4096);
-				try { let offset = 0; while (offset < frame.length) { const n = writeSync(fd, frame, offset, frame.length - offset); if (!n) return invalid(); offset += n; } }
-				finally { frame.fill(0); }
-			} finally { closeSync(fd); }
+				frame = encode({ version: 1, identity: launch, key: key.toString("hex") }, 4096);
+				const bytes = frame;
+				await new Promise<void>((resolve, reject) => {
+					const timer = setTimeout(() => { stream.destroy(); reject(new Error("Review channel deadline")); }, Math.max(0, deadline - Date.now()));
+					const failed = () => { clearTimeout(timer); reject(new Error("Review channel write failed")); };
+					stream.once("error", failed);
+					stream.write(bytes, error => {
+						completed = true; bytes.fill(0);
+						if (error) { clearTimeout(timer); stream.removeListener("error", failed); reject(new Error("Review channel write failed")); }
+						else stream.end(() => { clearTimeout(timer); stream.removeListener("error", failed); resolve(); });
+					});
+				});
+			} finally {
+				// A pending write retains its buffer until its own callback (never zero early).
+				if (completed) frame?.fill(0);
+				if (!await closeOwned(stream)) throw new Error("Review channel close unconfirmed");
+			}
 		},
 		verifyTerminal(bytes: Uint8Array, tag: Uint8Array): ReviewTerminalEnvelopeV1 | undefined {
 			try {
@@ -86,12 +158,29 @@ export function createLaunchChannel(value: ReviewLaunchIdentityV1) {
 	});
 }
 
-/** Call before execution-load; actualFinalization is a trusted runner closure, never a tool/JSON input. No signing arguments are exposed. */
-export function receiveRunnerReviewChannel(fd: number, actualConfigBytes: Uint8Array, actualFinalization: () => unknown): { finalize(): SignedReviewTerminal } | undefined {
-	const frame = Buffer.alloc(4097); let length = 0;
+/** Await before execution-load. Finalization is a trusted closure, not a signing tool. */
+export async function receiveRunnerReviewChannel(resources: ReviewChannelResources, handle: ReviewReaderHandle | undefined, actualConfigBytes: Uint8Array, actualFinalization: () => unknown, absoluteDeadline: number, diagnostic?: (value: ReviewChannelDiagnostic) => void): Promise<{ finalize(): SignedReviewTerminal } | undefined> {
+	const deadline = boundedDeadline(absoluteDeadline);
+	if (deadline === undefined || !resourceAccess.get(resources)?.takeReader(handle)) return undefined;
+	const frame = Buffer.alloc(4097); let length = 0; let readCount = 0; let eof = false; const start = Date.now();
+	let stream: Readable | undefined; let closeAttempted = false;
 	try {
-		while (length < frame.length) { const n = readSync(fd, frame, length, frame.length - length, null); if (!n) break; length += n; }
-		if (length > 4096) return undefined;
+		stream = process.versions.bun ? createReadStream("", { fd: 3, autoClose: true, highWaterMark: 4097 }) : new Socket({ fd: 3, readable: true, writable: false });
+		const owned = stream;
+		const valid = await new Promise<boolean>(resolve => {
+			let settled = false;
+			const timer = setTimeout(() => finish(false), Math.max(0, deadline - Date.now()));
+			function finish(value: boolean) { if (settled) return; settled = true; clearTimeout(timer); owned.pause(); resolve(value); }
+			owned.on("data", (chunk: Buffer) => {
+				if (settled) return;
+				readCount++; const count = Math.min(chunk.length, frame.length - length); chunk.copy(frame, length, 0, count); length += count;
+				if (length > 4096 || Date.now() >= deadline) finish(false);
+			});
+			owned.once("end", () => { eof = true; finish(Date.now() < deadline); });
+			owned.on("error", () => finish(false)); owned.once("close", () => finish(false));
+		});
+		closeAttempted = true;
+		if (!await closeOwned(owned) || !valid || !eof || length > 4096) return undefined;
 		const parsed = record(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.subarray(0, length))) as unknown, ["version", "identity", "key"]);
 		if (parsed.version !== 1) return undefined;
 		const launch = identity(parsed.identity); const keyHex = hex(parsed.key, [64]);
@@ -107,5 +196,8 @@ export function receiveRunnerReviewChannel(fd: number, actualConfigBytes: Uint8A
 			} finally { key.fill(0); }
 		} });
 	} catch { return undefined; }
-	finally { frame.fill(0); try { closeSync(fd); } catch { /* Missing channel cannot grant proof. */ } }
+	finally {
+		frame.fill(0); if (stream && !closeAttempted) await closeOwned(stream);
+		try { diagnostic?.(Object.freeze({ readCount, length, elapsedMs: Date.now() - start, eof })); } catch { /* Diagnostics never affect cleanup or authority. */ }
+	}
 }

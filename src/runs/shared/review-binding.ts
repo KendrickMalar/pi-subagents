@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { createLaunchChannel, decodeReviewTerminal, encodeReviewIdentity, encodeReviewTerminal, validateRawReviewOutcome, type RawReviewOutcomeV1, type ReviewLaunchIdentityV1, type ReviewTerminalEnvelopeV1 } from "./review-provenance-channel.ts";
+import { createLaunchChannel, decodeReviewTerminal, encodeReviewIdentity, encodeReviewTerminal, validateRawReviewOutcome, type ReviewChannelResources, type ReviewWriterHandle, type RawReviewOutcomeV1, type ReviewLaunchIdentityV1, type ReviewTerminalEnvelopeV1 } from "./review-provenance-channel.ts";
 
 declare const launchBrand: unique symbol;
 declare const terminalBrand: unique symbol;
@@ -11,7 +11,7 @@ export interface ReviewLaunchInput { subjectRunId: string; childIndex?: number; 
 /** Construct once per extension lifetime from actual caller context; inject the SAME object across loaders.
 	* These callbacks are trusted native lifecycle boundaries. This primitive does not establish their provenance.
 	*/
-export function createReviewAuthorityHost(lifetime: ReviewHostLifetime) {
+export function createReviewAuthorityHost(lifetime: ReviewHostLifetime, resources: ReviewChannelResources) {
 	const owner = { ownerSessionId: lifetime.ownerSessionId, ownerSubtreeId: lifetime.ownerSubtreeId, processInstanceId: lifetime.processInstanceId };
 	type Entry = { identity: ReviewLaunchIdentityV1; channel: ReturnType<typeof createLaunchChannel>; mode?: "async" | "foreground"; close?: RawReviewOutcomeV1; closeInvalid: boolean; consumed: boolean };
 	const launches = new WeakMap<object, Entry>();
@@ -29,12 +29,12 @@ export function createReviewAuthorityHost(lifetime: ReviewHostLifetime) {
 			const launch = JSON.parse(encodeReviewIdentity({ version: 1, subjectRunId: input.subjectRunId, ...(input.childIndex !== undefined ? { childIndex: input.childIndex } : {}), ...owner, nonce: randomBytes(16).toString("hex"), configDigest, cwd: input.cwd }).toString()) as ReviewLaunchIdentityV1;
 			Object.freeze(launch);
 			if (runIds.has(launch.subjectRunId)) throw new Error("Duplicate review launch");
-			const channel = createLaunchChannel(launch); runIds.add(launch.subjectRunId);
+			const channel = createLaunchChannel(launch, resources); runIds.add(launch.subjectRunId);
 			const handle = Object.freeze({}) as ReviewLaunchCapability;
 			launches.set(handle, { identity: launch, channel, closeInvalid: false, consumed: false }); return handle;
 		},
 		hasLaunch(handle: unknown): boolean { return entry(handle) !== undefined; },
-		writeLaunchToFd(handle: ReviewLaunchCapability, fd: number): void { requireEntry(handle).channel.writeInitialToFd(fd); },
+		writeLaunch(handle: ReviewLaunchCapability, writer: ReviewWriterHandle, absoluteDeadline: number): Promise<void> { return requireEntry(handle).channel.writeInitial(writer, absoluteDeadline); },
 		bindAsyncClose(handle: ReviewLaunchCapability, subscribeActualClose: (observe: (outcome: RawReviewOutcomeV1) => void) => void): void {
 			const e = requireEntry(handle); if (e.mode) throw new Error("Review launch already bound"); e.mode = "async";
 			try { subscribeActualClose(outcome => {
