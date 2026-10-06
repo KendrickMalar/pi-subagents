@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReviewChannelResources, createLaunchChannel, receiveRunnerReviewChannel, encodeReviewIdentity, encodeReviewTerminal, decodeReviewTerminal, type ReviewLaunchIdentityV1, type ReviewTerminalCaptureV1 } from "../../src/runs/shared/review-provenance-channel.ts";
@@ -97,4 +98,49 @@ test("trailing and truncated genuine secret frames are rejected without writing 
   const writer=resources.registerSpawnWriter(child);assert.ok(writer);await channel.writeInitial(writer,Date.now()+1000);
   const value=await result;assert.equal(value.signed,undefined);assert.equal(value.open,false);
  }
+});
+
+test("actual public slot3 EPIPE remains caught through queued error and owned close, then exits naturally", async () => {
+ const code=`import {spawn} from 'node:child_process';import {createHash} from 'node:crypto';import {statSync} from 'node:fs';import {createLaunchChannel,createReviewChannelResources} from ${JSON.stringify(url)};
+ const resources=createReviewChannelResources();const child=spawn(process.execPath,['-e',"require('node:fs').closeSync(3); console.log('peer-closed'); setTimeout(()=>console.log('peer-ordinary-timer'),100);"],{stdio:['ignore','pipe','pipe','pipe']});
+ const stream=child.stdio[3];stream.pause();stream.allowHalfOpen=true;const writer=resources.registerSpawnWriter(child);if(!writer)throw Error('registration');
+ const channel=createLaunchChannel(${JSON.stringify(identity)},resources);let started=false;
+ child.stdout.on('data',async bytes=>{console.log('child:'+bytes.toString().trim());if(started)return;started=true;
+ try{await channel.writeInitial(writer,Date.now()+500);throw Error('unexpected success')}catch(error){console.log('caught:'+String(error))}
+ console.log('owned-close:'+stream.closed);setTimeout(()=>{console.log('ordinary-timer-and-io:'+statSync(process.cwd()).isDirectory())},50)});
+ child.stderr.pipe(process.stderr);child.on('close',(code,signal)=>console.log('child-close:'+JSON.stringify({code,signal})));`;
+ const child=spawn(process.execPath,["--experimental-strip-types","--input-type=module","-e",code],{stdio:["ignore","pipe","pipe"]});
+ let stdout="",stderr="";child.stdout.on("data",b=>stdout+=b);child.stderr.on("data",b=>stderr+=b);
+ const outcome=await new Promise<{code:number|null;signal:string|null}>((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}))});
+ assert.equal(outcome.code,0,stderr);assert.equal(outcome.signal,null);
+ assert.match(stdout,/caught:Error: Review channel write failed/);assert.match(stdout,/owned-close:true/);assert.match(stdout,/ordinary-timer-and-io:true/);assert.match(stdout,/peer-ordinary-timer/);assert.match(stdout,/child-close:\{"code":0,"signal":null\}/);
+});
+
+test("slow actual owned writer close fails within the original absolute deadline, not another 1000ms", async () => {
+ const resources=createReviewChannelResources();const channel=createLaunchChannel(identity,resources);const {child,result}=childFixture();
+ const stream=child.stdio[3]!;const destroy=stream.destroy.bind(stream);
+ // Keep the actual spawned public socket: postpone its actual destruction/close.
+ stream.destroy=(error?: Error)=>{setTimeout(()=>destroy(error),200);return stream};
+ const writer=resources.registerSpawnWriter(child);assert.ok(writer);const start=Date.now();
+ await assert.rejects(channel.writeInitial(writer,start+80),/close unconfirmed|deadline/);
+ assert.ok(Date.now()-start<150,"cleanup must not add a fresh 1000ms");
+ await new Promise<void>(resolve=>{if(stream.closed)resolve();else stream.once('close',resolve)});
+ assert.equal(stream.closed,true);assert.ok((await result).signed);
+});
+
+
+test("registered FD3 replaced before adoption refuses the unrelated socket and preserves manual I/O", async () => {
+ const server=createServer(socket=>{socket.on("error",()=>{});socket.write("unrelated")});await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
+ const address=server.address();assert.ok(address&&typeof address!=="string");
+ const code=`import {fstatSync,closeSync,readSync} from 'node:fs';import {connect} from 'node:net';import {createReviewChannelResources,receiveRunnerReviewChannel} from ${JSON.stringify(url)};
+ const warm=connect(${address.port},'127.0.0.1');warm.on('error',()=>{});await new Promise(resolve=>warm.once('connect',resolve));warm.destroy();await new Promise(resolve=>warm.once('close',resolve));
+ const r=createReviewChannelResources();const reader=r.registerBootstrapReader();if(!reader)throw Error('registration');const old=fstatSync(3,{bigint:true});closeSync(3);
+ const socket=connect(${address.port},'127.0.0.1');socket.pause();await new Promise(resolve=>socket.once('connect',resolve));const fresh=fstatSync(3,{bigint:true});if(!fresh.isSocket()||old.dev===fresh.dev&&old.ino===fresh.ino)throw Error('actual different socket not installed');
+ await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('replacement readiness timeout')),500);socket.once('readable',()=>{clearTimeout(timer);resolve()});socket.once('error',reject)});
+ const result=await receiveRunnerReviewChannel(r,reader,Buffer.from('irrelevant'),()=>({}),Date.now()+100);let open=false;try{open=fstatSync(3).isSocket()}catch{};
+ const b=socket.read(9);const manual=Buffer.isBuffer(b)&&b.length===9&&b.toString()==='unrelated';
+ console.log(JSON.stringify({unsupported:result===undefined,open,manual}));socket.destroy();`;
+ const child=spawn(process.execPath,["--experimental-strip-types","--input-type=module","-e",code],{env:{...process.env,PI_SUBAGENT_REVIEW_CHANNEL_V1:"fd3"},stdio:["ignore","pipe","pipe","pipe"]});
+ let stdout="",stderr="";child.stdout.on("data",b=>stdout+=b);child.stderr.on("data",b=>stderr+=b);
+ try{const exit=await new Promise(resolve=>child.once("close",resolve));assert.equal(exit,0,stderr);assert.deepEqual(JSON.parse(stdout),{unsupported:true,open:true,manual:true})}finally{server.close()}
 });

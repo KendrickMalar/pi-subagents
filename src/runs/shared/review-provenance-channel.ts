@@ -79,7 +79,9 @@ function boundedDeadline(deadline: number): number | undefined {
  * The marker is routing, NOT cryptographic authority. Product bootstrap wiring is a later slice.
  */
 export function createReviewChannelResources() {
-	const readers = new WeakMap<object, true>(); const writers = new WeakMap<object, Writable>();
+	// Trusted declaration plus exact resource freshness, not fstat authentication or
+	// a sandbox against arbitrary same-process descriptor manipulation.
+	const readers = new WeakMap<object, { dev: bigint; ino: bigint; mode: bigint }>(); const writers = new WeakMap<object, Writable>();
 	const registered = new WeakSet<object>(); let declared = false;
 	const resources = Object.freeze({
 		registerBootstrapReader(): ReviewReaderHandle | undefined {
@@ -87,8 +89,12 @@ export function createReviewChannelResources() {
 			const marker = process.env.PI_SUBAGENT_REVIEW_CHANNEL_V1;
 			delete process.env.PI_SUBAGENT_REVIEW_CHANNEL_V1;
 			if (marker !== "fd3") return undefined;
-			try { if (!fstatSync(3).isSocket()) return undefined; } catch { return undefined; }
-			const handle = Object.freeze({}) as ReviewReaderHandle; readers.set(handle, true); return handle;
+			try {
+				const stat = fstatSync(3, { bigint: true });
+				if (!stat.isSocket() || stat.ino === 0n) return undefined;
+				const handle = Object.freeze({}) as ReviewReaderHandle;
+				readers.set(handle, { dev: stat.dev, ino: stat.ino, mode: stat.mode }); return handle;
+			} catch { return undefined; }
 		},
 		registerSpawnWriter(child: ChildProcess): ReviewWriterHandle | undefined {
 			if (!(child instanceof ChildProcess) || !Number.isSafeInteger(child.pid) || !Array.isArray(child.stdio)) return undefined;
@@ -99,7 +105,15 @@ export function createReviewChannelResources() {
 		},
 	});
 	resourceAccess.set(resources, {
-		takeReader(handle) { if (!object(handle) || !readers.has(handle)) return false; readers.delete(handle); return true; },
+		takeReader(handle) {
+			if (!object(handle)) return false;
+			const original = readers.get(handle); if (!original) return false;
+			readers.delete(handle);
+			try {
+				const fresh = fstatSync(3, { bigint: true });
+				return fresh.isSocket() && fresh.ino !== 0n && fresh.dev === original.dev && fresh.ino === original.ino && fresh.mode === original.mode;
+			} catch { return false; }
+		},
 		takeWriter(handle) { if (!object(handle)) return undefined; const stream = writers.get(handle); if (stream) writers.delete(handle); return stream; },
 	});
 	return resources;
@@ -107,10 +121,10 @@ export function createReviewChannelResources() {
 export type ReviewChannelResources = ReturnType<typeof createReviewChannelResources>;
 
 /** Close is acknowledged by the owned stream's event/state, not by a numeric FD fallback. */
-function closeOwned(stream: Readable | Writable): Promise<boolean> {
+function closeOwned(stream: Readable | Writable, deadline: number): Promise<boolean> {
 	if (stream.closed) return Promise.resolve(true);
 	return new Promise(resolve => {
-		const timer = setTimeout(() => { stream.removeListener("close", closed); resolve(false); }, 1000);
+		const timer = setTimeout(() => { stream.removeListener("close", closed); resolve(false); }, Math.max(0, deadline - Date.now()));
 		function closed() { clearTimeout(timer); resolve(stream.closed); }
 		stream.once("close", closed); if (!stream.destroyed) stream.destroy();
 	});
@@ -132,17 +146,19 @@ export function createLaunchChannel(value: ReviewLaunchIdentityV1, resources: Re
 				await new Promise<void>((resolve, reject) => {
 					const timer = setTimeout(() => { stream.destroy(); reject(new Error("Review channel deadline")); }, Math.max(0, deadline - Date.now()));
 					const failed = () => { clearTimeout(timer); reject(new Error("Review channel write failed")); };
-					stream.once("error", failed);
+					// A write callback can precede its queued error event. Keep the owned
+					// stream's handler for its lifetime, including close and late callbacks.
+					stream.on("error", failed);
 					stream.write(bytes, error => {
 						completed = true; bytes.fill(0);
-						if (error) { clearTimeout(timer); stream.removeListener("error", failed); reject(new Error("Review channel write failed")); }
-						else stream.end(() => { clearTimeout(timer); stream.removeListener("error", failed); resolve(); });
+						if (error) { clearTimeout(timer); reject(new Error("Review channel write failed")); }
+						else stream.end(() => { clearTimeout(timer); resolve(); });
 					});
 				});
 			} finally {
 				// A pending write retains its buffer until its own callback (never zero early).
 				if (completed) frame?.fill(0);
-				if (!await closeOwned(stream)) throw new Error("Review channel close unconfirmed");
+				if (!await closeOwned(stream, deadline)) throw new Error("Review channel close unconfirmed");
 			}
 		},
 		verifyTerminal(bytes: Uint8Array, tag: Uint8Array): ReviewTerminalEnvelopeV1 | undefined {
@@ -180,7 +196,7 @@ export async function receiveRunnerReviewChannel(resources: ReviewChannelResourc
 			owned.on("error", () => finish(false)); owned.once("close", () => finish(false));
 		});
 		closeAttempted = true;
-		if (!await closeOwned(owned) || !valid || !eof || length > 4096) return undefined;
+		if (!await closeOwned(owned, deadline) || !valid || !eof || length > 4096) return undefined;
 		const parsed = record(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.subarray(0, length))) as unknown, ["version", "identity", "key"]);
 		if (parsed.version !== 1) return undefined;
 		const launch = identity(parsed.identity); const keyHex = hex(parsed.key, [64]);
@@ -197,7 +213,7 @@ export async function receiveRunnerReviewChannel(resources: ReviewChannelResourc
 		} });
 	} catch { return undefined; }
 	finally {
-		frame.fill(0); if (stream && !closeAttempted) await closeOwned(stream);
+		frame.fill(0); if (stream && !closeAttempted) await closeOwned(stream, deadline);
 		try { diagnostic?.(Object.freeze({ readCount, length, elapsedMs: Date.now() - start, eof })); } catch { /* Diagnostics never affect cleanup or authority. */ }
 	}
 }
