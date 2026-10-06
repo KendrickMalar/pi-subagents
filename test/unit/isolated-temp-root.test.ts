@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 const loaderUrl = new URL("../support/isolated-temp-root.mjs", import.meta.url).href;
 const typesUrl = new URL("../../src/shared/types.ts", import.meta.url).href;
@@ -86,6 +87,67 @@ fs.writeFileSync(${JSON.stringify(path.join(fixture, `${name}.json`))}, JSON.str
 		}
 		assert.equal(fs.existsSync(configuredRoot), true);
 		assert.equal(fs.existsSync(callerAgentDir), false);
+	} finally {
+		fs.rmSync(fixture, { recursive: true, force: true });
+	}
+});
+
+it("binds fresh suite assets to the resolved local SDK and preserves nested overrides", () => {
+	const sdkEntry = new URL(import.meta.resolve("@earendil-works/pi-coding-agent"));
+	const sdkRoot = path.dirname(path.dirname(fileURLToPath(sdkEntry)));
+	const sdkPackage = JSON.parse(fs.readFileSync(path.join(sdkRoot, "package.json"), "utf8")) as { name: string; version: string };
+	const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "loader-assets-"));
+	const callerAssets = path.join(fixture, "caller-assets");
+	const nestedAssets = path.join(fixture, "nested-assets");
+	const recordPath = path.join(fixture, "assets.json");
+	fs.mkdirSync(callerAssets, { mode: 0o700 });
+	fs.mkdirSync(nestedAssets, { mode: 0o700 });
+	fs.writeFileSync(path.join(callerAssets, "package.json"), JSON.stringify({ name: "caller-assets", version: "0.0.0" }));
+	try {
+		const nestedScript = 'console.log(JSON.stringify({ assets: process.env.PI_PACKAGE_DIR }));';
+		const entry = path.join(fixture, "assets.test.mjs");
+		fs.writeFileSync(entry, `
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { spawnSync } from "node:child_process";
+import { getPackageDir, getPackageJsonPath, getThemesDir, PACKAGE_NAME, VERSION } from ${JSON.stringify(new URL("./config.js", sdkEntry).href)};
+const nestedEntry = path.join(process.env.TMPDIR, "nested-assets.mjs");
+fs.writeFileSync(nestedEntry, ${JSON.stringify(nestedScript)});
+const nestedEnv = { ...process.env, PI_PACKAGE_DIR: ${JSON.stringify(nestedAssets)} };
+const nested = spawnSync(process.execPath, ["--import", ${JSON.stringify(loaderUrl)}, "--eval", ${JSON.stringify(nestedScript)}],
+  { encoding: "utf8", env: nestedEnv });
+const nestedFile = spawnSync(process.execPath, ["--import", ${JSON.stringify(loaderUrl)}, nestedEntry],
+  { encoding: "utf8", env: nestedEnv });
+if (nested.status !== 0) throw new Error(nested.stderr);
+if (nestedFile.status !== 0) throw new Error(nestedFile.stderr);
+fs.writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify({
+  assets: process.env.PI_PACKAGE_DIR, packageDir: getPackageDir(), packagePath: getPackageJsonPath(),
+  name: PACKAGE_NAME, version: VERSION, themePath: path.join(getThemesDir(), "dark.json"),
+  nested: JSON.parse(nested.stdout), nestedFile: JSON.parse(nestedFile.stdout)
+}));
+`);
+		const env = { ...process.env, PI_SUBAGENTS_TEMP_ROOT: path.join(fixture, "suite"), PI_PACKAGE_DIR: callerAssets };
+		delete env.PI_SUBAGENTS_TEST_LOADER;
+		delete env.NODE_TEST_CONTEXT;
+		const result = spawnSync(process.execPath, ["--import", loaderUrl, "--test", entry], { encoding: "utf8", env });
+		assert.equal(result.status, 0, result.stderr + result.stdout);
+		const record = JSON.parse(fs.readFileSync(recordPath, "utf8")) as {
+			assets: string; packageDir: string; packagePath: string; name: string; version: string; themePath: string;
+			nested: { assets: string }; nestedFile: { assets: string };
+		};
+		assert.deepEqual(record.nested, { assets: nestedAssets });
+		assert.deepEqual(record.nestedFile, { assets: nestedAssets });
+		const evalResult = spawnSync(process.execPath, ["--import", loaderUrl, "--eval", nestedScript], { encoding: "utf8", env });
+		assert.equal(evalResult.status, 0, evalResult.stderr);
+		assert.deepEqual(JSON.parse(evalResult.stdout), { assets: callerAssets });
+		assert.equal(record.assets, sdkRoot);
+		assert.equal(record.packageDir, sdkRoot);
+		assert.equal(record.packagePath, path.join(sdkRoot, "package.json"));
+		assert.equal(record.name, "@earendil-works/pi-coding-agent");
+		assert.equal(record.name, sdkPackage.name);
+		assert.equal(record.version, sdkPackage.version);
+		assert.equal(record.themePath, path.join(sdkRoot, "dist", "modes", "interactive", "theme", "dark.json"));
+		assert.equal(fs.existsSync(record.themePath), true);
 	} finally {
 		fs.rmSync(fixture, { recursive: true, force: true });
 	}

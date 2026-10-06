@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const loaderState = process.env.PI_SUBAGENTS_TEST_LOADER;
 const nestedTestProcess = loaderState !== undefined;
@@ -11,6 +12,13 @@ const evalEntry = process.execArgv.some((arg) =>
 	arg === "-e" || arg === "-p" || arg === "-pe" ||
 	arg === "--eval" || arg === "--print" || arg.startsWith("--eval=") || arg.startsWith("--print="));
 const freshSuiteFile = testFileProcess && process.argv[1] !== undefined && process.argv[1] !== "-" && !evalEntry;
+if (freshSuiteFile) {
+	const sdkEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+	if (path.basename(sdkEntry) !== "index.js" || path.basename(path.dirname(sdkEntry)) !== "dist") {
+		throw new Error(`Unexpected local SDK entry layout: ${sdkEntry}`);
+	}
+	process.env.PI_PACKAGE_DIR = path.dirname(path.dirname(sdkEntry));
+}
 const configuredTempRoot = process.env.PI_SUBAGENTS_TEMP_ROOT?.trim();
 const containerRoot = configuredTempRoot
 	? path.resolve(configuredTempRoot)
