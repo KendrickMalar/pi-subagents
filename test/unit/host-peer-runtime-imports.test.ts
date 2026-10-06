@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { HOST_PEER_ALIASES, resolveHostPeerAliases } from "../../src/runs/background/runner-aliases.ts";
+import { findHostPeerPackageDir, HOST_PEER_ALIASES, resolveHostPeerAliases, resolvePackageSubpath } from "../../src/runs/background/runner-aliases.ts";
 import { resolveInstalledPiPackageRoot } from "../../src/runs/shared/pi-spawn.ts";
 import { resolveCompileFromPackageRoot, validateStructuredOutputValue } from "../../src/runs/shared/structured-output.ts";
 import type { JsonSchemaObject } from "../../src/shared/types.ts";
@@ -66,6 +66,7 @@ test("every host peer package the detached async runner imports is aliased to th
 	const visited = new Set<string>([entryPoint]);
 	const queue: string[] = [entryPoint];
 	const violations: string[] = [];
+	const importedPeers = new Set<string>();
 	const aliased = new Set(HOST_PEER_ALIASES.map((entry) => entry.specifier));
 
 	while (queue.length > 0) {
@@ -74,6 +75,7 @@ test("every host peer package the detached async runner imports is aliased to th
 		for (const specifier of extractStaticImportSpecifiers(source)) {
 			const hostPeerMatch = matchingHostPeerPackage(specifier);
 			if (hostPeerMatch) {
+				importedPeers.add(specifier);
 				if (!aliased.has(specifier)) violations.push(`${path.relative(projectRoot, file)} imports '${specifier}' (host peer package '${hostPeerMatch}'), which has no runner alias`);
 				continue;
 			}
@@ -95,7 +97,21 @@ test("every host peer package the detached async runner imports is aliased to th
 	assert.ok(packageRoot, "expected the pi package (or its test shim) to be resolvable");
 	const resolved = resolveHostPeerAliases(packageRoot);
 	assert.deepEqual(resolved.missing, []);
-	for (const specifier of aliased) assert.ok(fs.existsSync(resolved.aliases[specifier]!), `alias target for ${specifier} exists`);
+	for (const { specifier, pkg, subpath, optional } of HOST_PEER_ALIASES) {
+		const packageDir = findHostPeerPackageDir(packageRoot, pkg);
+		assert.ok(packageDir, `host peer package ${pkg} exists`);
+		const target = resolvePackageSubpath(packageDir, subpath);
+		if (optional && target === undefined) {
+			assert.equal(resolved.aliases[specifier], undefined, `unpublished optional ${specifier} has no alias`);
+			assert.ok(!importedPeers.has(specifier), `runtime import graph must not import unpublished optional ${specifier}`);
+			continue;
+		}
+		assert.ok(target && fs.existsSync(target), `required or published alias target for ${specifier} exists`);
+		assert.equal(resolved.aliases[specifier], fs.realpathSync(target), `alias for ${specifier} retains its exact export target`);
+	}
+	for (const specifier of importedPeers) {
+		assert.ok(resolved.aliases[specifier] && fs.existsSync(resolved.aliases[specifier]), `reachable runtime import ${specifier} has an installed alias`);
+	}
 });
 
 test("resolves pi-agent-core/node to its exact package export instead of appending to the root alias", () => {
@@ -119,6 +135,64 @@ test("resolves pi-agent-core/node to its exact package export instead of appendi
 		assert.equal(resolved.aliases["@earendil-works/pi-agent-core"], fs.realpathSync(path.join(distDir, "index.js")));
 		assert.equal(resolved.aliases["@earendil-works/pi-agent-core/node"], fs.realpathSync(path.join(distDir, "node.js")));
 		assert.notEqual(resolved.aliases["@earendil-works/pi-agent-core/node"], path.join(distDir, "index.js", "node"));
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reports a published optional pi-agent-core/node export whose target is missing", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-core-missing-node-"));
+	const packageDir = path.join(root, "node_modules", "@earendil-works", "pi-agent-core");
+	try {
+		fs.mkdirSync(packageDir, { recursive: true });
+		fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
+			name: "@earendil-works/pi-agent-core",
+			exports: { ".": "./index.js", "./node": "./missing-node.js" },
+		}));
+		fs.writeFileSync(path.join(packageDir, "index.js"), "export {};\n");
+		const resolved = resolveHostPeerAliases(root);
+		assert.equal(resolved.aliases["@earendil-works/pi-agent-core"], fs.realpathSync(path.join(packageDir, "index.js")));
+		assert.equal(resolved.aliases["@earendil-works/pi-agent-core/node"], undefined);
+		assert.ok(resolved.missing.includes("@earendil-works/pi-agent-core/node"));
+		assert.ok(!resolved.missing.includes("@earendil-works/pi-agent-core"));
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reports required missing and blocked exports without falling back to main", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-core-required-"));
+	const packageDir = path.join(root, "node_modules", "@earendil-works", "pi-agent-core");
+	try {
+		fs.mkdirSync(packageDir, { recursive: true });
+		fs.writeFileSync(path.join(packageDir, "index.js"), "export {};\n");
+		for (const exports of [{ ".": "./missing.js" }, { "./node": "./index.js" }, { ".": null }]) {
+			fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
+				name: "@earendil-works/pi-agent-core", main: "./index.js", exports,
+			}));
+			const resolved = resolveHostPeerAliases(root);
+			assert.equal(resolved.aliases["@earendil-works/pi-agent-core"], undefined, JSON.stringify(exports));
+			assert.ok(resolved.missing.includes("@earendil-works/pi-agent-core"), JSON.stringify(exports));
+		}
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("omits an explicitly blocked optional export without aliasing its main fallback", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-core-blocked-node-"));
+	const packageDir = path.join(root, "node_modules", "@earendil-works", "pi-agent-core");
+	try {
+		fs.mkdirSync(packageDir, { recursive: true });
+		fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({
+			name: "@earendil-works/pi-agent-core", main: "./index.js",
+			exports: { ".": "./index.js", "./node": null },
+		}));
+		fs.writeFileSync(path.join(packageDir, "index.js"), "export {};\n");
+		const resolved = resolveHostPeerAliases(root);
+		assert.equal(resolved.aliases["@earendil-works/pi-agent-core"], fs.realpathSync(path.join(packageDir, "index.js")));
+		assert.equal(resolved.aliases["@earendil-works/pi-agent-core/node"], undefined);
+		assert.ok(!resolved.missing.includes("@earendil-works/pi-agent-core/node"));
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
