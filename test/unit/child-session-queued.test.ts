@@ -30,6 +30,67 @@ describe("childSessionHasQueuedMessages", () => {
 	});
 });
 
+describe("default factory queued-input adapters", () => {
+	for (const method of ["steer", "followUp"] as const) {
+		for (const outcome of ["queued", "handled", "rejected"] as const) {
+			it(`${method} awaits ${outcome} input and preserves the void/rejection contract`, async () => {
+				let resolveInput!: (value: "queued" | "handled") => void;
+				let rejectInput!: (error: Error) => void;
+				const input = new Promise<"queued" | "handled">((resolve, reject) => {
+					resolveInput = resolve;
+					rejectInput = reject;
+				});
+				const received: string[] = [];
+				const queueInput = (text: string) => { received.push(text); return input; };
+				const factory = createDefaultChildSessionFactory({
+					loadPiCodingAgent: async () => ({
+						ModelRuntime: { create: async () => ({}) },
+						SettingsManager: { create: () => ({}) },
+						DefaultResourceLoader: class { async reload() {} },
+						SessionManager: { inMemory: () => ({}) },
+						resolveCliModel: () => ({}),
+						createAgentSession: async () => ({ session: {
+							bindExtensions: async () => {},
+							dispose() {},
+							extensionRunner: { hasHandlers: () => false },
+							subscribe: () => () => {},
+							steer: queueInput,
+							followUp: queueInput,
+							messages: [],
+							sessionId: "queued-input-adapter",
+						} }),
+					} as unknown as PiCodingAgentModule),
+				});
+				const child = await factory.create({
+					cwd: process.cwd(), storage: { kind: "memory" }, extensionPaths: [],
+					ambientExtensions: false, hooks: [], noSkills: true, noContextFiles: true,
+					runtime: { fanoutChild: false, depth: 1, waitTool: { enabled: false }, fast: false } as ChildSessionLaunch["runtime"],
+				});
+				try {
+					let settled = false;
+					const completion = child[method]("child input");
+					void completion.then(() => { settled = true; }, () => { settled = true; });
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					assert.equal(settled, false, "child must wait for SDK input completion");
+					assert.deepEqual(received, ["child input"]);
+					if (outcome === "rejected") {
+						const failure = new Error(`${method} input rejected`);
+						const rejection = assert.rejects(completion, (error) => error === failure);
+						rejectInput(failure);
+						await rejection;
+					} else {
+						resolveInput(outcome);
+						assert.equal(await completion, undefined, "SDK disposition must not leak to ChildSession");
+					}
+				} finally {
+					await child.dispose();
+					await factory.dispose();
+				}
+			});
+		}
+	}
+});
+
 describe("default factory queued-message probe", () => {
 	it("rejects a required loader failure before requested-model resolution", async () => {
 		let modelResolved = false;
