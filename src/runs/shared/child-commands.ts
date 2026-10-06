@@ -142,11 +142,12 @@ export function createChildCommandRuntime(channelDir: string) {
 						if (job.snapshot.state === "running") onUpdate?.(update);
 					}, ctx)).then((result) => {
 						job.snapshot.output = text(result);
-						job.snapshot.state = "completed";
 						const fullOutputPath = (result.details as { fullOutputPath?: string } | undefined)?.fullOutputPath;
 						if (fullOutputPath) job.snapshot.fullOutputPath = fullOutputPath;
+						if (result.isError === true) throw new Error(job.snapshot.output || "Command failed.");
+						job.snapshot.state = "completed";
 						return result;
-					}, (error: unknown) => {
+					}).catch((error: unknown) => {
 						job.snapshot.state = controller.signal.aborted ? "cancelled" : "failed";
 						job.snapshot.output = String(error).slice(-MAX_OUTPUT_BYTES);
 						throw error;

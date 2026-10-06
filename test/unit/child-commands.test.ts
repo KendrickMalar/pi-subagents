@@ -76,6 +76,9 @@ describe("child commands using Pi's real bash backend", () => {
 		const bash = commands.wrap(createBashToolDefinition(dir));
 		try {
 			await assert.rejects(bash.execute("fail", { command: "exit 7" }, undefined, undefined, ctx), /code 7/);
+			assert.equal(commands.operate("status", "fail").commands[0].state, "failed");
+			assert.match(commands.operate("status", "fail").commands[0].output, /code 7/);
+			assert.equal(readChildCommandState(dir)?.commands[0].state, "failed");
 			await assert.rejects(bash.execute("timeout", { command: "sleep 10", timeout: 0.05 }, undefined, undefined, ctx), /timed out/);
 			assert.equal(commands.operate("status", "timeout").commands[0].state, "failed");
 			const result = await bash.execute("recover", { command: "printf recovered" }, undefined, undefined, ctx);
@@ -166,6 +169,79 @@ describe("Pi agent loop command cancellation", () => {
 		} finally { agent.abort(); await commands.shutdown(); await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 	});
 
+});
+
+describe("command result error adaptation", () => {
+	it("rejects error results through the failure path without serializing structured details", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-child-result-error-"));
+		const commands = createChildCommandRuntime(dir);
+		const details = { fullOutputPath: path.join(dir, "full-output.txt"), secret: "not-for-history", cycle: {} };
+		details.cycle = details;
+		const custom: ToolDefinition = {
+			name: "bash", label: "Custom shell", description: "Custom execution", parameters: Type.Object({}),
+			async execute() {
+				return { isError: true, content: [{ type: "text", text: "x".repeat(16_384) + "\nCommand exited with code 7" }], details };
+			},
+		};
+		try {
+			await assert.rejects(commands.wrap(custom).execute("error-result", {}, undefined, undefined, ctx), /code 7/);
+			const snapshot = commands.state().commands[0];
+			assert.equal(snapshot.state, "failed");
+			assert.match(snapshot.output, /code 7/);
+			assert.ok(Buffer.byteLength(snapshot.output) <= 8192);
+			assert.equal(snapshot.fullOutputPath, details.fullOutputPath);
+			assert.equal(readChildCommandState(dir)?.commands[0].state, "failed");
+			assert.doesNotMatch(JSON.stringify(commands.state()), /not-for-history|cycle/);
+			await commands.finish();
+		} finally { await commands.shutdown(); await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+	});
+
+	it("returns false and absent error flags unchanged as completed results", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-child-result-success-"));
+		const commands = createChildCommandRuntime(dir);
+		try {
+			for (const isError of [false, undefined]) {
+				const result = { ...(isError === undefined ? {} : { isError }), content: [{ type: "text" as const, text: "done" }], details: undefined };
+				const custom: ToolDefinition = {
+					name: "bash", label: "Custom shell", description: "Custom execution", parameters: Type.Object({}),
+					async execute() { return result; },
+				};
+				const id = String(isError);
+				assert.equal(await commands.wrap(custom).execute(id, {}, undefined, undefined, ctx), result);
+				assert.equal(commands.operate("status", id).commands[0].state, "completed");
+			}
+			await commands.finish();
+		} finally { await commands.shutdown(); await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+	});
+
+	it("preserves ordinary thrown failures and distinguishes targeted cancellation from run abort for error results", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-child-result-abort-"));
+		const commands = createChildCommandRuntime(dir);
+		const failure = new Error("backend failure");
+		const custom: ToolDefinition = {
+			name: "bash", label: "Custom shell", description: "Custom execution", parameters: Type.Object({}),
+			async execute(id, _params, signal) {
+				if (id === "throw") throw failure;
+				await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+				return { isError: true, content: [{ type: "text", text: "Command aborted" }], details: undefined };
+			},
+		};
+		try {
+			const bash = commands.wrap(custom);
+			await assert.rejects(bash.execute("throw", {}, undefined, undefined, ctx), (error) => error === failure);
+			assert.equal(commands.operate("status", "throw").commands[0].state, "failed");
+			await bash.execute("targeted", { yieldTimeMs: 0 }, undefined, undefined, ctx);
+			commands.operate("cancel", "targeted");
+			await until(() => commands.operate("status", "targeted").commands[0].endedAt !== undefined);
+			assert.equal(commands.operate("status", "targeted").commands[0].state, "cancelled");
+			const controller = new AbortController();
+			await bash.execute("run-abort", { yieldTimeMs: 0 }, controller.signal, undefined, ctx);
+			controller.abort();
+			await until(() => commands.operate("status", "run-abort").commands[0].endedAt !== undefined);
+			assert.equal(commands.operate("status", "run-abort").commands[0].state, "failed");
+			await commands.finish();
+		} finally { await commands.shutdown(); await fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+	});
 });
 
 describe("command identities and bounded observation", () => {
