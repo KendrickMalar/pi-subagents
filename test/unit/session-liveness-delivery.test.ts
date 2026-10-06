@@ -243,15 +243,18 @@ describe("session liveness through result delivery", () => {
 			assert.equal(session.messages.filter((message) => message.role === "custom" && message.customType === "subagent-notify").length, 2, "Pi started both queued wakes");
 			await (session.extensionRunner as unknown as { emit(event: unknown): Promise<unknown> }).emit({ type: "session_shutdown", reason: "quit" });
 		} finally {
-			session?.dispose();
-			delete (globalThis as Record<PropertyKey, unknown>)[registryKey];
-			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-			if (previousChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
-			else process.env.PI_SUBAGENT_CHILD = previousChild;
-			if (previousParentSession === undefined) delete process.env.PI_SUBAGENT_PARENT_SESSION;
-			else process.env.PI_SUBAGENT_PARENT_SESSION = previousParentSession;
-			fs.rmSync(root, { recursive: true, force: true });
+			try {
+				session?.dispose();
+			} finally {
+				delete (globalThis as Record<PropertyKey, unknown>)[registryKey];
+				if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+				else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+				if (previousChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
+				else process.env.PI_SUBAGENT_CHILD = previousChild;
+				if (previousParentSession === undefined) delete process.env.PI_SUBAGENT_PARENT_SESSION;
+				else process.env.PI_SUBAGENT_PARENT_SESSION = previousParentSession;
+				fs.rmSync(root, { recursive: true, force: true });
+			}
 		}
 	});
 });
