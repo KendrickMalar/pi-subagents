@@ -185,51 +185,55 @@ describe("session liveness through result delivery", () => {
 		const agentDir = path.join(root, "agent");
 		fs.mkdirSync(agentDir);
 		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-		process.env.PI_CODING_AGENT_DIR = agentDir;
+		const previousChild = process.env.PI_SUBAGENT_CHILD;
+		const previousParentSession = process.env.PI_SUBAGENT_PARENT_SESSION;
 		const registryKey = Symbol.for(PI_WEB_SESSION_LIVENESS_REGISTRY_KEY);
-		let provider: { isActive(): boolean } | undefined;
-		(globalThis as Record<PropertyKey, unknown>)[registryKey] = {
-			version: 1,
-			register(value: { isActive(): boolean }) { provider = value; return () => {}; },
-		};
-		const sessionManager = SessionManager.inMemory(root);
-		const sessionId = sessionManager.getSessionId();
-		const complete = (api: Parameters<typeof registerSubagentExtension>[0], id: string) => api.events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
-			id, runId: id, sessionId, completionOwnerId: currentCompletionOwnerId(), success: false, summary: `${id} needs the parent`,
-		});
-		const activeAt: Record<string, boolean | undefined> = {};
-		const faux = fauxProvider({ provider: "session-liveness", models: [{ id: "local" }], tokensPerSecond: 100_000 });
-		faux.setResponses([
-			() => fauxAssistantMessage("First reply."),
-			() => fauxAssistantMessage("Second reply."),
-			() => fauxAssistantMessage("Third reply."),
-		]);
-		const settingsManager = SettingsManager.inMemory({});
-		const resourceLoader = new DefaultResourceLoader({
-			cwd: root, agentDir, settingsManager,
-			noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-			extensionFactories: [
-				(api) => { api.registerProvider(faux.provider); },
-				registerSubagentExtension,
-				(api) => {
-					api.on("agent_start", () => {
-						if ("duringTurn" in activeAt) return;
-						complete(api, "during-turn");
-						activeAt.duringTurn = provider?.isActive();
-					});
-					api.on("agent_settled", () => {
-						if ("atSettle" in activeAt) {
-							activeAt.finalSettle = provider?.isActive();
-							return;
-						}
-						complete(api, "at-settle");
-						activeAt.atSettle = provider?.isActive();
-					});
-				},
-			],
-		});
 		let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
 		try {
+			process.env.PI_CODING_AGENT_DIR = agentDir;
+			delete process.env.PI_SUBAGENT_CHILD;
+			delete process.env.PI_SUBAGENT_PARENT_SESSION;
+			let provider: { isActive(): boolean } | undefined;
+			(globalThis as Record<PropertyKey, unknown>)[registryKey] = {
+				version: 1,
+				register(value: { isActive(): boolean }) { provider = value; return () => {}; },
+			};
+			const sessionManager = SessionManager.inMemory(root);
+			const sessionId = sessionManager.getSessionId();
+			const complete = (api: Parameters<typeof registerSubagentExtension>[0], id: string) => api.events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+				id, runId: id, sessionId, completionOwnerId: currentCompletionOwnerId(), success: false, summary: `${id} needs the parent`,
+			});
+			const activeAt: Record<string, boolean | undefined> = {};
+			const faux = fauxProvider({ provider: "session-liveness", models: [{ id: "local" }], tokensPerSecond: 100_000 });
+			faux.setResponses([
+				() => fauxAssistantMessage("First reply."),
+				() => fauxAssistantMessage("Second reply."),
+				() => fauxAssistantMessage("Third reply."),
+			]);
+			const settingsManager = SettingsManager.inMemory({});
+			const resourceLoader = new DefaultResourceLoader({
+				cwd: root, agentDir, settingsManager,
+				noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+				extensionFactories: [
+					(api) => { api.registerProvider(faux.provider); },
+					registerSubagentExtension,
+					(api) => {
+						api.on("agent_start", () => {
+							if ("duringTurn" in activeAt) return;
+							complete(api, "during-turn");
+							activeAt.duringTurn = provider?.isActive();
+						});
+						api.on("agent_settled", () => {
+							if ("atSettle" in activeAt) {
+								activeAt.finalSettle = provider?.isActive();
+								return;
+							}
+							complete(api, "at-settle");
+							activeAt.atSettle = provider?.isActive();
+						});
+					},
+				],
+			});
 			await resourceLoader.reload();
 			const modelRuntime = await ModelRuntime.create({ authPath: path.join(agentDir, "auth.json"), modelsPath: path.join(agentDir, "models.json"), allowModelNetwork: false });
 			({ session } = await createAgentSession({ cwd: root, agentDir, settingsManager, resourceLoader, modelRuntime, model: faux.getModel("local"), sessionManager, noTools: "builtin" }));
@@ -243,6 +247,10 @@ describe("session liveness through result delivery", () => {
 			delete (globalThis as Record<PropertyKey, unknown>)[registryKey];
 			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			if (previousChild === undefined) delete process.env.PI_SUBAGENT_CHILD;
+			else process.env.PI_SUBAGENT_CHILD = previousChild;
+			if (previousParentSession === undefined) delete process.env.PI_SUBAGENT_PARENT_SESSION;
+			else process.env.PI_SUBAGENT_PARENT_SESSION = previousParentSession;
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
