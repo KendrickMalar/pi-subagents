@@ -769,6 +769,34 @@ function structuredHeader(item: FleetItem, width: number, theme: Theme, conversa
 	return lines.map((line) => truncateToWidth(line, width));
 }
 
+// Only called for generated metadata, before the plain transcript body starts.
+function wrapFleetDetailLine(line: string, width: number): string[] {
+	width = Math.max(1, width);
+	const artifact = /^(\s*(?:Output|Session|Events|Log|Result|Transcript file): )(.+)$/.exec(line);
+	const tail = /^((?:Transcript|Session transcript|External stderr|External stdout) tail from )(.+?)( \(tail truncated\))?:$/.exec(line);
+	if (!artifact && !tail) return wrapTextWithAnsi(line, width);
+	const match = artifact ?? tail!;
+	const parts = [match[1]!, ...match[2]!.split(/(?<=\/)/), ...(tail ? [`${tail[3] ?? ""}:`] : [])];
+	const rows: string[] = [];
+	let current = "";
+	for (const part of parts) {
+		// Fitting components (including spaces) stay intact. Oversized ones use
+		// the SDK's grapheme-safe fallback; retain whitespace as separate tokens
+		// so its word wrapping cannot discard characters from a path.
+		const chunks = visibleWidth(part) <= width ? [part] : (part.match(/\s+|\S+/g) ?? []).flatMap((token) =>
+			/^\s+$/.test(token) ? [...token] : wrapTextWithAnsi(token, width));
+		for (const chunk of chunks) {
+			if (current && visibleWidth(current) + visibleWidth(chunk) > width) {
+				rows.push(current);
+				current = "";
+			}
+			current += chunk;
+		}
+	}
+	if (current) rows.push(current);
+	return rows.length ? rows : [""];
+}
+
 function fit(text: string, width: number): string {
 	const clipped = truncateToWidth(text, Math.max(0, width));
 	return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
@@ -1325,18 +1353,25 @@ export class SubagentFleetComponent implements Component {
 		const raw = detailLines(selected, this.snapshot.error, this.state);
 		if (transcriptWarning) raw.unshift(`Transcript preview warning: ${transcriptWarning}`, "");
 		const lines: string[] = [];
+		let inBody = false;
 		for (const line of raw) {
-			const styled = /^(Run|State|Mode|Source|Child|Agent|Model|Task):/.test(line)
-				? this.theme.bold(line)
+			const style = (text: string): string => /^(Run|State|Mode|Source|Child|Agent|Model|Task):/.test(line)
+				? this.theme.bold(text)
 				: /^(Transcript|Result transcript tail)/.test(line)
-					? this.theme.fg("accent", line)
+					? this.theme.fg("accent", text)
 					: /^(Output|Session|Transcript file|Artifacts):/.test(line)
-						? this.theme.fg("muted", line)
+						? this.theme.fg("muted", text)
 						: /^Transcript preview warning:/.test(line)
-							? this.theme.fg("warning", line)
-							: line;
-			const wrapped = wrapTextWithAnsi(styled, Math.max(1, width));
+							? this.theme.fg("warning", text)
+							: text;
+			const isPath = !inBody && (/^\s*(?:Output|Session|Events|Log|Result|Transcript file): /.test(line)
+				|| /^(?:Transcript|Session transcript|External stderr|External stdout) tail from /.test(line));
+			const wrapped = isPath
+				? wrapFleetDetailLine(line, width).map(style)
+				: wrapTextWithAnsi(style(line), Math.max(1, width));
 			lines.push(...(wrapped.length ? wrapped : [""]));
+			if (/^(?:Transcript|Result transcript tail|Preview|Recent output from status\.json:)$/.test(line)
+				|| /^(?:Transcript|Session transcript|External stderr|External stdout) tail(?: from .*)?(?: \(tail truncated\))?:$/.test(line)) inBody = true;
 		}
 		return { header: [], body: this.withActionLines(lines) };
 	}

@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { visibleWidth, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { visibleWidth, wrapTextWithAnsi, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 import { registerInspector } from "../../src/api/inspectors.ts";
 import { getInspectorPlugins, registerInspectorEventListener } from "../../src/inspectors/plugins.ts";
@@ -56,6 +56,7 @@ function writeAsyncRun(root: string, input: {
 	models?: string[];
 	thinking?: string[];
 	output?: string;
+	recentOutput?: string[];
 	transcript?: Array<Record<string, unknown>>;
 }): string {
 	const asyncDir = path.join(root, input.id);
@@ -75,6 +76,7 @@ function writeAsyncRun(root: string, input: {
 		currentStep: 0,
 		steps: agents.map((agent, index) => ({
 			agent,
+			...(input.recentOutput ? { recentOutput: input.recentOutput } : {}),
 			...(input.contexts?.[index] ? { context: input.contexts[index] } : {}),
 			...(input.models?.[index] ? { model: input.models[index] } : {}),
 			...(input.thinking?.[index] ? { thinking: input.thinking[index] } : {}),
@@ -110,6 +112,45 @@ const markdownTheme: MarkdownTheme = {
 	strikethrough: (text) => text,
 	underline: (text) => text,
 };
+
+function collectPlainFleetRows(component: SubagentFleetComponent): { rows: string[]; screens: string[][] } {
+	const screens: string[][] = [];
+	const detailRows = (): string[] => {
+		const screen = component.render(100);
+		for (const row of screen) assert.ok(visibleWidth(row) <= 100, `width overflow: ${row}`);
+		assert.equal(screen.length, 27, "100×32 overlay must retain its 85% height budget");
+		screens.push(screen);
+		return screen.slice(3, -3).map((row) => row.replace(/\x1b\[[0-9;]*m/g, "").split("│")[2]!.trimEnd());
+	};
+	let viewport = detailRows();
+	const rows = [...viewport];
+	while (rows.at(-1) === "") rows.pop();
+	for (let scroll = 0; scroll < 300; scroll++) {
+		component.handleInput("K");
+		const previous = viewport;
+		viewport = detailRows();
+		if (JSON.stringify(viewport) === JSON.stringify(previous)) return { rows, screens };
+		rows.unshift(viewport[0]!);
+	}
+	assert.fail("plain detail scrolling did not reach the top");
+}
+
+function assertPlainFleetPath(rows: string[], prefix: string, file: string, suffix = ""): void {
+	const start = rows.findIndex((row) => row.startsWith(prefix.trimEnd()));
+	assert.ok(start >= 0, `missing path label: ${prefix}`);
+	let restored = "";
+	const pathRows: string[] = [];
+	for (const [index, row] of rows.slice(start).entries()) {
+		pathRows.push(row);
+		// The old SDK may discard only the label's delimiter space at a wrap.
+		restored += index === 0 && row === prefix.trimEnd() ? prefix : row;
+		if (restored.length >= `${prefix}${file}${suffix}`.length) break;
+	}
+	assert.equal(restored, `${prefix}${file}${suffix}`, "all path characters and separators must survive wrapping");
+	if (visibleWidth(path.basename(file)) <= 61) {
+		assert.ok(pathRows.some((row) => row.includes(path.basename(file))), `basename split in ${prefix}${file}`);
+	}
+}
 
 describe("native subagent fleet", () => {
 	it("rewrites an authored prompt from guidance without persistence", async () => {
@@ -1079,6 +1120,120 @@ describe("native subagent fleet", () => {
 		} finally {
 			component.dispose();
 		}
+	});
+
+	it("keeps fitting artifact and tail basenames whole across deterministic path lengths", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-path-components-"));
+		const cases: Array<{ paths: string[]; rows: string[]; screens: string[][] }> = [];
+		try {
+			for (const extra of [0, 17, 61]) {
+				// Exercise the real 61-column detail pane regardless of the host TMP prefix.
+				const padding = (55 - visibleWidth(`${root}//path-run/`) % 61 + 61) % 61;
+				const nestedRoot = path.join(root, "d".repeat((padding || 61) + extra));
+				const body = `Output: /${"z".repeat(53)}/ordinary-async-body.md`;
+				const asyncDir = writeAsyncRun(nestedRoot, { id: "path-run", state: "complete", output: `PATH BODY SENTINEL\n${body}\nunsafe \x1b[31m text` });
+				const paths = ["output-0.log", "worker.jsonl", "events.jsonl", "subagent-log-path-run.md"].map((name) => path.join(asyncDir, name));
+				for (const file of paths.slice(1)) fs.writeFileSync(file, "", "utf-8");
+				const component = new SubagentFleetComponent(
+					{ terminal: { rows: 32, columns: 100 }, requestRender() {} } as never,
+					{ ...theme, fg: (_name: string, text: string) => `\x1b[36m${text}\x1b[39m` } as never,
+					stateForTest(), () => {}, { asyncDirRoot: nestedRoot, refreshMs: 60_000 },
+				);
+				try {
+					cases.push({ paths, ...collectPlainFleetRows(component) });
+				} finally { component.dispose(); }
+			}
+			console.log("FLEET PATH COMPONENT EVIDENCE", JSON.stringify(cases));
+			for (const { paths, rows } of cases) {
+				for (const file of paths) {
+					assert.ok(rows.some((row) => row.includes(path.basename(file))), `basename split: ${file}\n${rows.join("\n")}`);
+				}
+				for (const [label, file] of [["Output", paths[0]], ["Session", paths[1]], ["Events", paths[2]], ["Log", paths[3]]] as const) {
+					assertPlainFleetPath(rows, `  ${label}: `, file!);
+				}
+				assertPlainFleetPath(rows, "Transcript tail from ", paths[0]!, ":");
+				const bodyStart = rows.indexOf("  PATH BODY SENTINEL") + 1;
+				assert.deepEqual(rows.slice(bodyStart), [
+					...wrapTextWithAnsi(`  Output: /${"z".repeat(53)}/ordinary-async-body.md`, 61),
+					"  unsafe [U+001B][31m text",
+				]);
+			}
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
+	it("keeps recentOutput fallback prefix-looking body on ordinary SDK wrapping", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-recent-output-body-"));
+		try {
+			const recentOutput = ["Output", "Session", "Events", "Log", "Result"].map((label) => `${label}: /${"z".repeat(53)}/ordinary-status-body-${label}.md`);
+			const asyncDir = writeAsyncRun(root, { id: "recent-output-body", recentOutput });
+			const component = new SubagentFleetComponent(
+				{ terminal: { rows: 32, columns: 100 }, requestRender() {} } as never,
+				theme as never, stateForTest(), () => {}, { asyncDirRoot: root, refreshMs: 60_000 },
+			);
+			try {
+				const { rows, screens } = collectPlainFleetRows(component);
+				const expected = recentOutput.flatMap((line) => wrapTextWithAnsi(`  ${line}`, 61));
+				console.log("FLEET B1 RECENT OUTPUT EVIDENCE", JSON.stringify({ asyncDir, statusPath: path.join(asyncDir, "status.json"), recentOutput, rows, screens, expected }));
+				const header = rows.indexOf("Recent output from status.json:");
+				assert.ok(header >= 0, "must exercise the recentOutput fallback producer");
+				assert.deepEqual(rows.slice(header + 1), expected);
+			} finally { component.dispose(); }
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
+	it("preserves Unicode spaced foreground paths, oversized components, and prefix-looking body wrapping", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-path-body-"));
+		try {
+			const outputPath = path.join(root, "資料 space", "output 資料 report.md");
+			const sessionFile = path.join(root, "x".repeat(80), "session 資料.jsonl");
+			const transcriptPath = path.join(root, `${"y".repeat(80)}.jsonl`);
+			const body = ["Output", "Session", "Events", "Log", "Result"].map((label) => `${label}: /${"z".repeat(53)}/ordinary-body-${label}.md`).join("\n");
+			const state = stateForTest();
+			state.foregroundRuns!.set("path-body", {
+				runId: "path-body", mode: "single", cwd: root, sessionId: "session-current", updatedAt: 200,
+				children: [{ agent: "worker", index: 0, status: "completed", savedOutputPath: outputPath, sessionFile, transcriptPath, finalOutput: body }],
+			});
+			const component = new SubagentFleetComponent(
+				{ terminal: { rows: 32, columns: 100 }, requestRender() {} } as never,
+				{ ...theme, fg: (name: string, text: string) => name === "muted" ? `\x1b[36m${text}\x1b[39m` : text } as never,
+				state, () => {}, { asyncDirRoot: path.join(root, "empty"), refreshMs: 60_000 },
+			);
+			try {
+				const { rows, screens } = collectPlainFleetRows(component);
+				console.log("FLEET FOREGROUND PATH EVIDENCE", JSON.stringify({ outputPath, sessionFile, transcriptPath, body, rows, screens }));
+				assertPlainFleetPath(rows, "Output: ", outputPath);
+				assertPlainFleetPath(rows, "Session: ", sessionFile);
+				assertPlainFleetPath(rows, "Transcript file: ", transcriptPath);
+				assert.ok(rows.some((row) => row.includes(path.basename(outputPath))));
+				assert.ok(rows.some((row) => row.includes(path.basename(sessionFile))));
+				const bodyStart = rows.indexOf("Result transcript tail") + 1;
+				assert.deepEqual(rows.slice(bodyStart), body.split("\n").flatMap((line) => wrapTextWithAnsi(line, 61)));
+				assert.ok(screens.flat().some((row) => row.includes("\x1b[36m")), "path theme should remain present");
+			} finally { component.dispose(); }
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
+	});
+
+	it("keeps prefix-looking structured conversation text on the existing SDK wrap path", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-structured-path-body-"));
+		try {
+			const body = `Output: /${"z".repeat(53)}/ordinary-structured-body.md`;
+			writeAsyncRun(root, { id: "structured-body", state: "complete", transcript: [
+				{ recordType: "message", role: "assistant", text: "Ready" },
+				{ recordType: "message", role: "user", text: body },
+			] });
+			const component = new SubagentFleetComponent(
+				{ terminal: { rows: 32, columns: 100 }, requestRender() {} } as never,
+				theme as never, stateForTest(), () => {}, { asyncDirRoot: root, refreshMs: 60_000, markdownTheme },
+			);
+			try {
+				const screen = component.render(100);
+				assert.ok(screen.some((row) => row.includes("Supervisor")));
+				for (const fragment of wrapTextWithAnsi(body, 59)) assert.ok(screen.some((row) => row.includes(fragment)));
+				assert.ok(!screen.some((row) => row.includes("ordinary-structured-body.md")), "structured body should not gain path-aware wrapping");
+				for (const row of screen) assert.ok(visibleWidth(row) <= 100);
+				console.log("FLEET STRUCTURED BODY EVIDENCE", JSON.stringify({ body, screen }));
+			} finally { component.dispose(); }
+		} finally { fs.rmSync(root, { recursive: true, force: true }); }
 	});
 
 	it("renders selectable transcript detail and completed artifact paths within terminal width", () => {

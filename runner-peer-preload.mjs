@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import * as nodeModule from "node:module";
 import { pathToFileURL } from "node:url";
 
@@ -12,7 +13,15 @@ if (typeof nodeModule.registerHooks === "function") {
 		resolve(specifier, context, nextResolve) {
 			const alias = nativeRunner ? aliases[specifier] : redirected.has(specifier) && aliases[specifier];
 			if (alias) {
-				const target = pathToFileURL(alias).href;
+				let resolvedAlias = alias;
+				if (nativeRunner) {
+					try {
+						resolvedAlias = fs.realpathSync(alias);
+					} catch (error) {
+						if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+					}
+				}
+				const target = pathToFileURL(resolvedAlias).href;
 				return nativeRunner ? { url: target, shortCircuit: true } : nextResolve(target, context);
 			}
 			try {

@@ -209,14 +209,16 @@ describe("createForkContextResolver", () => {
 		}
 	});
 
-	it("fails clearly for an unflushed user-only parent", () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-user-only-"));
+	it("fails clearly for an unpersisted parent with a current leaf", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-unpersisted-"));
 		try {
-			const sessionDir = path.join(tempDir, "sessions");
-			const parent = SessionManager.create(tempDir, sessionDir);
-			parent.appendMessage({ role: "user", content: "first turn prompt" });
-			const parentSessionFile = parent.getSessionFile();
-			const leafId = parent.getLeafId();
+			// Model the resolver's consumed interface, not SDK-specific flush timing.
+			const parentSessionFile = path.join(tempDir, "sessions", "unpersisted-parent.jsonl");
+			const leafId = "unpersisted-user-leaf";
+			const parent: Pick<SessionManager, "getSessionFile" | "getLeafId"> = {
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => leafId,
+			};
 
 			assert.ok(parentSessionFile);
 			assert.ok(leafId);
@@ -230,6 +232,48 @@ describe("createForkContextResolver", () => {
 			assert.equal(parent.getSessionFile(), parentSessionFile);
 			assert.equal(parent.getLeafId(), leafId);
 			assert.equal(fs.existsSync(parentSessionFile), false);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("forks a persisted user-only SDK parent without changing its content or binding", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-user-only-"));
+		try {
+			const sessionDir = path.join(tempDir, "sessions");
+			const parent = SessionManager.create(tempDir, sessionDir);
+			parent.appendMessage({ role: "user", content: "first turn prompt" });
+			const parentSessionFile = parent.getSessionFile();
+			const leafId = parent.getLeafId();
+
+			assert.ok(parentSessionFile);
+			assert.ok(leafId);
+			// SDK 1.0.4 persists the first user message, before any assistant reply.
+			assert.equal(fs.existsSync(parentSessionFile), true);
+			const parentContent = fs.readFileSync(parentSessionFile, "utf-8");
+			const parentEntries = parent.getEntries();
+
+			const resolver = createForkContextResolver(parent, "fork");
+			const childSessionFile = resolver.sessionFileForIndex(0);
+			assert.ok(childSessionFile);
+			assert.notEqual(childSessionFile, parentSessionFile);
+			assert.equal(fs.existsSync(childSessionFile), true);
+			assert.equal(path.dirname(childSessionFile), path.join(sessionDir, path.basename(parentSessionFile, ".jsonl"), "forks"));
+
+			const child = SessionManager.open(childSessionFile);
+			assert.equal(child.getHeader()?.parentSession, parentSessionFile);
+			assert.equal(child.getLeafId(), leafId);
+			const entries = child.getEntries();
+			assert.deepEqual(entries, parentEntries);
+			assert.equal(entries.length, 1);
+			assert.ok(entries[0].type === "message");
+			assert.equal(entries[0].message.role, "user");
+			assert.equal(entries[0].message.content, "first turn prompt");
+			assert.equal(parent.getSessionFile(), parentSessionFile);
+			assert.equal(parent.getLeafId(), leafId);
+			assert.deepEqual(parent.getEntries(), parentEntries);
+			assert.equal(fs.readFileSync(parentSessionFile, "utf-8"), parentContent);
+			assert.deepEqual(fs.readdirSync(sessionDir).filter((file) => file.endsWith(".jsonl")), [path.basename(parentSessionFile)]);
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
