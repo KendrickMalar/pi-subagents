@@ -6,9 +6,9 @@ import { createReviewChannelResources, type ReviewTerminalCaptureV1, type RawRev
 const lifetime = { ownerSessionId: "session", ownerSubtreeId: "tree", processInstanceId: "instance" };
 const launchInput = { subjectRunId: "run", childIndex: 1, cwd: "/repo", configBytes: Buffer.from("actual config") };
 const capture: ReviewTerminalCaptureV1 = { rawOutcome: { exitCode: 1, signal: null }, originalAcceptanceDigest: "a".repeat(64), evidenceDigest: "b".repeat(64), repo: "/repo", cwd: "/repo", head: "c".repeat(40), trackedStateDigest: "d".repeat(64), captureTime: 10 };
-async function fixture(actualCapture: () => unknown = () => capture) {
+async function fixture(actualCapture: () => unknown = () => capture, isActive?: () => boolean) {
 	const resources = createReviewChannelResources();
-	const host = createReviewAuthorityHost(lifetime, resources);
+	const host = createReviewAuthorityHost(lifetime, resources, isActive);
 	const launch = host.issueLaunch(launchInput);
 	const url = new URL("../../src/runs/shared/review-provenance-channel.ts", import.meta.url).href;
 	const code = `import {createReviewChannelResources,receiveRunnerReviewChannel} from ${JSON.stringify(url)};const r=createReviewChannelResources();const runner=await receiveRunnerReviewChannel(r,r.registerBootstrapReader(),Buffer.from(${JSON.stringify(launchInput.configBytes.toString())}),()=>(${JSON.stringify(actualCapture())}),Date.now()+1000);if(!runner)throw Error('missing signer');const signed=runner.finalize();console.log(JSON.stringify({bytes:signed.bytes.toString('base64'),tag:signed.tag.toString('base64')}));`;
@@ -66,4 +66,19 @@ test("foreground captures trusted actual finalization once and validates callbac
 	assert.ok(Object.isFrozen(host.getTerminal(terminal)?.identity));
 	assert.ok(Object.isFrozen(host.getTerminal(terminal)?.rawOutcome));
 	assert.throws(() => host.registerForegroundTerminal(launch, () => capture));
+});
+test("revocation rejects late actual close, signed terminal and captured native finalizer", async () => {
+	let active = true;
+	const { host, launch, signed, close } = await fixture(() => capture, () => active);
+	const verify = host.verifyAsyncTerminal;
+	active = false; close(capture.rawOutcome);
+	assert.equal(verify(launch, signed.bytes, signed.tag), undefined);
+	assert.equal(host.hasLaunch(launch), false);
+	active = true;
+	// Late close has been invalidated even if an incorrectly reusable external guard flips.
+	assert.equal(verify(launch, signed.bytes, signed.tag), undefined);
+	const guarded = createReviewAuthorityHost(lifetime, createReviewChannelResources(), () => active);
+	const foreground = guarded.issueLaunch(launchInput);
+	assert.throws(() => guarded.registerForegroundTerminal(foreground, () => { active = false; return capture; }));
+	assert.equal(guarded.hasLaunch(foreground), false);
 });
