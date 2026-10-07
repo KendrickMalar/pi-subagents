@@ -3,6 +3,8 @@ import test from "node:test";
 import * as binding from "../../src/runs/shared/review-binding.ts";
 import { createReviewChannelResources } from "../../src/runs/shared/review-provenance-channel.ts";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +30,63 @@ test("existing host refuses every captured operation after private active guard 
 	assert.equal(verifyAsyncTerminal(pending, Buffer.alloc(0), Buffer.alloc(0)), undefined);
 	assert.throws(() => writeLaunch(pending, Object.freeze({}) as Parameters<typeof writeLaunch>[1], Date.now() + 1000));
 	assert.equal(called, false);
+});
+
+test("captured write rejects revoked epoch after real FD3 delivery even with a newly admitted epoch", async () => {
+	const c = binding.createReviewCoordinator(); const domain = {}; let reads = 0;
+	const actual = { sessionManager: { getSessionId: () => { reads++; return "session"; } } };
+	const scope = c.admitActualCaller(actual, domain); assert.ok(scope);
+	const resources = createReviewChannelResources(); const host = c.createAuthorityHost(scope, resources);
+	const launch = host.issueLaunch(input);
+	const child = spawn(process.execPath, ["-e", `const {Socket}=require('node:net');const s=new Socket({fd:3,readable:true,writable:false});let received=false;s.on('data',()=>{received=true});s.on('end',()=>console.log(received?'received-frame':'empty'));s.on('error',e=>{console.error(e.code);process.exitCode=1});`], { stdio: ["ignore", "pipe", "pipe", "pipe"], env: { HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, PATH: process.env.PATH } });
+	let output = "", errors = "";
+	child.stdout!.on("data", b => output += b); child.stderr!.on("data", b => errors += b);
+	const closed = once(child, "close"); const writer = resources.registerSpawnWriter(child); assert.ok(writer);
+	const { writeLaunch } = host; const pending = writeLaunch(launch, writer, Date.now() + 1000);
+	c.invalidateOwner("reload", scope);
+	const replacement = c.admitActualCaller(actual, domain); assert.ok(replacement); assert.notEqual(replacement, scope);
+	let writeOutcome = "resolved"; try { await pending; } catch { writeOutcome = "rejected"; }
+	const [exit, signal] = await closed;
+	console.log(JSON.stringify({ writeOutcome, ownerActive: c.hasScope(scope), childExit: exit, childSignal: signal, childOutput: output.trim(), childErrors: errors.trim() }));
+	assert.equal(exit, 0); assert.equal(signal, null); assert.equal(output.trim(), "received-frame"); assert.equal(errors, "");
+	assert.equal(reads, 2, "completion must not reread SDK identity or re-admit");
+	assert.equal(writeOutcome, "rejected"); assert.equal(host.hasLaunch(launch), false);
+});
+
+test("subscription revocation rejects completion and late close across a replacement epoch", () => {
+	const c = binding.createReviewCoordinator(); const domain = {}; const actual = ctx();
+	const scope = c.admitActualCaller(actual, domain); assert.ok(scope);
+	const host = c.createAuthorityHost(scope, createReviewChannelResources()); const launch = host.issueLaunch(input);
+	let close: (outcome: typeof capture.rawOutcome) => void = () => { throw Error("missing observer"); };
+	assert.throws(() => host.bindAsyncClose(launch, observe => {
+		close = observe; c.invalidateOwner("reload", scope);
+		assert.ok(c.admitActualCaller(actual, domain)); observe(capture.rawOutcome);
+	}));
+	close(capture.rawOutcome);
+	assert.equal(host.hasLaunch(launch), false);
+	assert.equal(host.verifyAsyncTerminal(launch, Buffer.alloc(0), Buffer.alloc(0)), undefined);
+	assert.equal(host.getTerminal({}), undefined);
+	assert.throws(() => host.issueLaunch({ ...input, subjectRunId: "late" }));
+	assert.throws(() => host.bindAsyncClose(launch, () => assert.fail("inactive subscriber called")));
+	assert.throws(() => host.registerForegroundTerminal(launch, () => assert.fail("inactive finalizer called")));
+});
+
+test("finalization revocation rejects captured original scope despite replacement admission", () => {
+	const c = binding.createReviewCoordinator(); const domain = {}; const actual = ctx();
+	const scope = c.admitActualCaller(actual, domain); assert.ok(scope);
+	const host = c.createAuthorityHost(scope, createReviewChannelResources()); const launch = host.issueLaunch(input);
+	assert.throws(() => host.registerForegroundTerminal(launch, () => {
+		c.invalidateOwner("reload", scope); assert.ok(c.admitActualCaller(actual, domain)); return capture;
+	}));
+	assert.equal(host.hasLaunch(launch), false); assert.equal(host.getTerminal({}), undefined);
+});
+
+test("finalization validation cannot publish a terminal after callback capture revokes its epoch", () => {
+	const c = binding.createReviewCoordinator(); const scope = c.admitActualCaller(ctx(), {}); assert.ok(scope);
+	const host = c.createAuthorityHost(scope, createReviewChannelResources()); const launch = host.issueLaunch(input);
+	const captured = new Proxy(capture, { getPrototypeOf(target) { c.invalidateOwner("reload", scope); return Object.getPrototypeOf(target); } });
+	assert.throws(() => host.registerForegroundTerminal(launch, () => captured));
+	assert.equal(host.hasLaunch(launch), false); assert.equal(host.getTerminal({}), undefined);
 });
 
 test("constructor creates no owner; missing and serialized caller data cannot mint scopes", () => {

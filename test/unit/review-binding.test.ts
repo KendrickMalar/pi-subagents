@@ -67,6 +67,17 @@ test("foreground captures trusted actual finalization once and validates callbac
 	assert.ok(Object.isFrozen(host.getTerminal(terminal)?.rawOutcome));
 	assert.throws(() => host.registerForegroundTerminal(launch, () => capture));
 });
+test("trusted subscription cannot report a successful bind after revoking its captured guard", () => {
+	let active = true;
+	const host = createReviewAuthorityHost(lifetime, createReviewChannelResources(), () => active);
+	const launch = host.issueLaunch(launchInput);
+	assert.throws(() => host.bindAsyncClose(launch, observe => {
+		observe(capture.rawOutcome); active = false;
+	}));
+	assert.equal(host.hasLaunch(launch), false);
+	assert.equal(host.verifyAsyncTerminal(launch, Buffer.alloc(0), Buffer.alloc(0)), undefined);
+});
+
 test("revocation rejects late actual close, signed terminal and captured native finalizer", async () => {
 	let active = true;
 	const { host, launch, signed, close } = await fixture(() => capture, () => active);

@@ -20,6 +20,7 @@ export function createReviewAuthorityHost(lifetime: ReviewHostLifetime, resource
 	const runIds = new Set<string>();
 	function entry(handle: unknown): Entry | undefined { return isActive() && handle !== null && typeof handle === "object" ? launches.get(handle) : undefined; }
 	function requireEntry(handle: unknown): Entry { const e = entry(handle); if (!e || e.consumed) throw new Error("Unsupported review launch capability"); return e; }
+	function requireCapturedEntry(handle: unknown, captured: Entry): void { if (requireEntry(handle) !== captured) throw new Error("Unsupported review launch capability"); }
 	function terminal(e: Entry, value: ReviewTerminalEnvelopeV1): ReviewTerminalCapability {
 		e.consumed = true;
 		const handle = Object.freeze({}) as ReviewTerminalCapability; terminals.set(handle, value); return handle;
@@ -36,14 +37,20 @@ export function createReviewAuthorityHost(lifetime: ReviewHostLifetime, resource
 			launches.set(handle, { identity: launch, channel, closeInvalid: false, consumed: false }); return handle;
 		},
 		hasLaunch(handle: unknown): boolean { return entry(handle) !== undefined; },
-		writeLaunch(handle: ReviewLaunchCapability, writer: ReviewWriterHandle, absoluteDeadline: number): Promise<void> { return requireEntry(handle).channel.writeInitial(writer, absoluteDeadline); },
+		writeLaunch(handle: ReviewLaunchCapability, writer: ReviewWriterHandle, absoluteDeadline: number): Promise<void> {
+			const e = requireEntry(handle);
+			return e.channel.writeInitial(writer, absoluteDeadline).then(() => { requireCapturedEntry(handle, e); });
+		},
 		bindAsyncClose(handle: ReviewLaunchCapability, subscribeActualClose: (observe: (outcome: RawReviewOutcomeV1) => void) => void): void {
 			const e = requireEntry(handle); if (e.mode) throw new Error("Review launch already bound"); e.mode = "async";
 			try { subscribeActualClose(outcome => {
-				if (!isActive()) { e.closeInvalid = true; return; }
+				if (entry(handle) !== e) { e.closeInvalid = true; return; }
 				if (e.close || e.closeInvalid) { e.closeInvalid = true; return; }
-				try { e.close = validateRawReviewOutcome(outcome); } catch { e.closeInvalid = true; }
-			}); } catch (error) { e.closeInvalid = true; throw error; }
+				try {
+					const close = validateRawReviewOutcome(outcome);
+					requireCapturedEntry(handle, e); e.close = close;
+				} catch { e.closeInvalid = true; }
+			}); requireCapturedEntry(handle, e); } catch (error) { e.closeInvalid = true; throw error; }
 		},
 		verifyAsyncTerminal(handle: ReviewLaunchCapability, bytes: Uint8Array, tag: Uint8Array): ReviewTerminalCapability | undefined {
 			const e = entry(handle);
@@ -55,10 +62,11 @@ export function createReviewAuthorityHost(lifetime: ReviewHostLifetime, resource
 		registerForegroundTerminal(handle: ReviewLaunchCapability, actualFinalization: () => unknown): ReviewTerminalCapability {
 			const e = requireEntry(handle); if (e.mode) throw new Error("Review launch already bound");
 			const capture = actualFinalization();
-			if (!isActive()) throw new Error("Inactive review owner");
+			requireCapturedEntry(handle, e);
 			// Runtime strict validation includes unknown callback fields; no caller acceptance projection.
 			if (!capture || typeof capture !== "object" || Object.getPrototypeOf(capture) !== Object.prototype || Reflect.ownKeys(capture).some(key => typeof key !== "string" || ["version", "identity"].includes(key)) || Object.values(Object.getOwnPropertyDescriptors(capture)).some(d => !Object.hasOwn(d, "value"))) throw new Error("Invalid review finalization");
 			const value = decodeReviewTerminal(encodeReviewTerminal({ version: 1, identity: e.identity, ...capture }));
+			requireCapturedEntry(handle, e);
 			e.mode = "foreground"; return terminal(e, value);
 		},
 		getTerminal(handle: unknown): ReviewTerminalEnvelopeV1 | undefined { return isActive() && handle !== null && typeof handle === "object" ? terminals.get(handle) : undefined; },
