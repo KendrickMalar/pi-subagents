@@ -44,7 +44,7 @@ describe("subagent extension child mode", () => {
 			const calls = [];
 			const ctx = {
 				cwd: process.cwd(),
-				hasUI: true,
+				isIdle() { return false; }, hasUI: true,
 				ui: {
 					setToolsExpanded(value) { calls.push(value); },
 					setWidget() {},
@@ -111,7 +111,7 @@ describe("subagent extension child mode", () => {
 			registerFanoutChildSubagentExtension(makePi("fanout"), { fanoutChild: true, depth: 1, waitTool: { enabled: true }, fast: false });
 			const expanded = [];
 			const ctx = {
-				cwd: process.cwd(), hasUI: true,
+				cwd: process.cwd(), isIdle() { return false; }, hasUI: true,
 				ui: { setToolsExpanded(value) { expanded.push(value); } },
 				sessionManager: { getSessionId() { return "session-test"; }, getSessionFile() { return null; }, getBranch() { return []; } },
 				modelRegistry: { getAvailable() { return []; } },
@@ -435,7 +435,7 @@ describe("subagent extension child mode", () => {
 					setStatus() {}, notify() {},
 				};
 				const ctx = {
-					cwd: process.cwd(), hasUI: true, ui,
+					cwd: process.cwd(), isIdle() { return false; }, hasUI: true, ui,
 					sessionManager: { getSessionId() { return "slash-theme-session"; }, getSessionFile() { return null; }, getEntries() { return []; } },
 					modelRegistry: { getAvailable() { return []; } },
 				};
@@ -555,7 +555,7 @@ describe("subagent extension child mode", () => {
 			const channelDir = resolveSupervisorChannelDir("nested-reviewer-run", "reviewer", 0);
 			const requestFile = path.join(channelDir, "requests", requestId + ".json");
 			const ctx = {
-				cwd: process.cwd(), hasUI: false,
+				cwd: process.cwd(), isIdle() { return false; }, hasUI: false,
 				sessionManager: {
 					getSessionId() { return ownerSessionId; },
 					getSessionFile() { return runtimeSessionId; },
@@ -622,7 +622,7 @@ describe("subagent extension child mode", () => {
 				}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
 				const widgets = [];
 				const ctx = {
-					cwd: process.cwd(), hasUI: true,
+					cwd: process.cwd(), isIdle() { return false; }, hasUI: true,
 					ui: { setWidget(key, value) { widgets.push({ key, value }); }, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 					sessionManager: { getSessionId() { return "session-widget"; }, getSessionFile() { return null; }, getEntries() { return []; } },
 					modelRegistry: { getAvailable() { return []; } },
@@ -663,7 +663,7 @@ describe("subagent extension child mode", () => {
 				}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
 				let widget;
 				const ctx = {
-					cwd: process.cwd(), hasUI: true,
+					cwd: process.cwd(), isIdle() { return false; }, hasUI: true,
 					ui: {
 						setWidget(key, value) { if (key === "subagent-async") widget = value; },
 						requestRender() {}, getToolsExpanded() { return false; },
@@ -707,7 +707,7 @@ describe("subagent extension child mode", () => {
 				}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
 				const widgets = [];
 				const ctx = {
-					cwd: process.cwd(), hasUI: true,
+					cwd: process.cwd(), isIdle() { return false; }, hasUI: true,
 					ui: { setWidget(key, value) { widgets.push({ key, value }); }, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 					sessionManager: { getSessionId() { return "session-widget"; }, getSessionFile() { return null; }, getEntries() { return []; } },
 					modelRegistry: { getAvailable() { return []; } },
@@ -753,7 +753,7 @@ describe("subagent extension child mode", () => {
 			const runId = "management-refresh-" + crypto.randomUUID();
 			const sessionId = "session-" + runId;
 			const ctx = {
-				cwd: process.cwd(), hasUI: true,
+				cwd: process.cwd(), isIdle() { return false; }, hasUI: true,
 				ui: { setWidget(key, value) { widgets.push({ key, value }); }, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 				sessionManager: { getSessionId() { return sessionId; }, getSessionFile() { return null; }, getEntries() { return []; } },
 				modelRegistry: { getAvailable() { return []; } },
@@ -820,7 +820,7 @@ describe("subagent extension child mode", () => {
 				},
 			};
 			const ctx = {
-				cwd: process.cwd(), hasUI: false,
+				cwd: process.cwd(), isIdle() { return false; }, hasUI: false,
 				ui: { setWidget() {}, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 				sessionManager: { getSessionId() { return sessionId; }, getSessionFile() { return sessionFile; }, getEntries() { return []; } },
 				modelRegistry: { getAvailable() { return []; } },
@@ -885,7 +885,7 @@ describe("subagent extension child mode", () => {
 					getEntries() { return []; },
 				};
 				const ctx = {
-					cwd: process.cwd(), hasUI: false,
+					cwd: process.cwd(), isIdle() { return false; }, hasUI: false,
 					ui: { setWidget() {}, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 					sessionManager,
 					modelRegistry: { getAvailable() { return []; } },
@@ -973,7 +973,7 @@ describe("subagent extension child mode", () => {
 					sendMessage() {}, getSessionName() { return undefined; },
 				}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
 				const ctx = {
-					cwd: process.cwd(), hasUI: false,
+					cwd: process.cwd(), isIdle() { return false; }, hasUI: false,
 					ui: { setWidget() {}, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 					sessionManager: { getSessionId() { return sessionId; }, getSessionFile() { return null; }, getEntries() { return []; } },
 					modelRegistry: { getAvailable() { return []; } },
@@ -1048,7 +1048,7 @@ describe("subagent extension child mode", () => {
 				sendMessage(message) { sent.push(message); }, getSessionName() { return undefined; },
 			}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
 			const ctx = {
-				cwd: process.cwd(), hasUI: false,
+				cwd: process.cwd(), isIdle() { return false; }, hasUI: false,
 				ui: { setWidget() {}, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 				sessionManager: { getSessionId() { return "notify-shutdown-session"; }, getSessionFile() { return null; }, getEntries() { return []; } },
 				modelRegistry: { getAvailable() { return []; } },
@@ -1130,7 +1130,7 @@ describe("subagent extension child mode", () => {
 					sendMessage(message) { sent.push(message); }, getSessionName() { return undefined; },
 				}, { get(target, prop) { return prop in target ? target[prop] : () => undefined; } });
 				const ctx = {
-					cwd: process.cwd(), hasUI: false,
+					cwd: process.cwd(), isIdle() { return false; }, hasUI: false,
 					ui: { setWidget() {}, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 					sessionManager,
 					modelRegistry: { getAvailable() { return []; } },
@@ -1215,7 +1215,7 @@ describe("subagent extension child mode", () => {
 			let stale = false;
 			const ctx = {
 				cwd: process.cwd(),
-				get hasUI() {
+				isIdle() { return false; }, get hasUI() {
 					if (stale) throw new Error("This extension ctx is stale after session replacement or reload.");
 					return true;
 				},
@@ -1276,7 +1276,7 @@ describe("subagent extension child mode", () => {
 			fs.writeFileSync(newSession, "");
 			let currentSession = oldSession;
 			const sessionManager = { getSessionId() { return path.basename(currentSession); }, getSessionFile() { return currentSession; }, getEntries() { return []; } };
-			const ctx = { cwd: process.cwd(), hasUI: false, ui: { setWidget() {}, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } }, sessionManager, modelRegistry: { getAvailable() { return []; } } };
+			const ctx = { cwd: process.cwd(), isIdle() { return false; }, hasUI: false, ui: { setWidget() {}, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } }, sessionManager, modelRegistry: { getAvailable() { return []; } } };
 			registerSubagentExtension(pi);
 			for (const handler of handlers.get("session_start")) await handler({ reason: "startup" }, ctx);
 			currentSession = newSession;
@@ -1408,6 +1408,29 @@ describe("subagent extension child mode", () => {
 		);
 	});
 
+	it("tells the user to restart Pi when the installed version changed after load", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-stale-load-"));
+		for (const file of ["index.ts", "package.json", "src/runs/shared/herdr-pi-protocol.ts", "src/shared/package-version.ts"]) {
+			fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+			fs.copyFileSync(path.join(projectRoot, file), path.join(root, file));
+		}
+		const script = String.raw`
+			import * as fs from "node:fs";
+			import registerSubagentExtension from "./index.ts";
+			registerSubagentExtension({});
+			const manifest = JSON.parse(fs.readFileSync("package.json", "utf-8"));
+			fs.writeFileSync("package.json", JSON.stringify({ ...manifest, version: "999.0.0" }));
+			try { registerSubagentExtension({}); } catch (error) { console.log(error.message); }
+		`;
+		const output = execFileSync(process.execPath, ["--experimental-strip-types", "--input-type=module", "--eval", script], {
+			cwd: root,
+			env: { ...parentToolEnv(), [SUBAGENT_CHILD_ENV]: "1" },
+			encoding: "utf-8",
+		});
+		const loaded = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf-8")).version;
+		assert.equal(output.trim(), `pi-subagents 999.0.0 is installed, but this Pi process still has ${loaded} loaded. Restart Pi to load the update; /reload cannot replace extension modules that Node has already loaded.`);
+	});
+
 	it("does not double-register the child-safe subagent tool when index and fanout-child both load", () => {
 		const script = String.raw`
 			import registerSubagentExtension from "./index.ts";
@@ -1469,7 +1492,7 @@ describe("subagent extension child mode", () => {
 			if (!registeredTool) throw new Error("tool not registered");
 			const ctx = {
 				cwd: process.cwd(),
-				hasUI: false,
+				isIdle() { return false; }, hasUI: false,
 				sessionManager: { getSessionId() { return "session-test"; }, getSessionFile() { return null; } },
 				modelRegistry: { getAvailable() { return []; } },
 			};

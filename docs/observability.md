@@ -29,6 +29,8 @@ subagent({ action: "status", id: "..." })      // one run
 
 Or ask naturally: "Show me the current async runs."
 
+In a terminal that supports [OSC 7501](https://www.superlogical.com/rex/docs/build/program-status), each background run is also reported to the terminal as working, waiting on you, finished, or failed. See [`programStatus`](configuration.md#programstatus).
+
 ### Usage and cost accounting
 
 Run `/subagent-cost` for the parent session's combined parent and child token usage and cost. It includes completed async workflow children when their persisted receipts and metadata remain available. Missing child metadata is reported as unavailable when the receipt identifies that child. If the workflow receipt itself is missing, unreadable, invalid, or non-terminal, affected children can be omitted from the total without an unavailable count, so treat the result as a lower bound when run artifacts are unavailable.
@@ -123,7 +125,7 @@ Default keys:
 
 Set `fleetKeybindings` in the extension config to replace inspector-level keys when a terminal intercepts keys such as `PgUp`, `PgDn`, `Home`, or `End`. Prompt modes keep fixed keys such as `Esc`, `Enter`, `Tab`, and stop-confirmation `Y`/`N`.
 
-Enter and `H` use the available Inspect plugin. On macOS with Ghostty 1.3+ (TERM_PROGRAM=ghostty), this includes the other bundled open-only plugin using Ghostty's preview AppleScript API; status and close are unavailable because no binding is written. In a child-specific inspector, type ordinary guidance and press Enter to send it through the acknowledged steer channel; `steer <message>`, `status`, and `stop` remain available as explicit controls. The bundled Herdr plugin uses Herdr 0.7.5+.
+Enter and `H` use the available Inspect plugin. Inside tmux, this includes the bundled tmux plugin: it splits the focused window, runs the inspector pane there, and records a binding, so `status` and `close` are available and ordinary tmux keys such as the prefix keep working in the pane. On macOS with Ghostty 1.3+ (TERM_PROGRAM=ghostty), this includes the other bundled open-only plugin using Ghostty's preview AppleScript API; status and close are unavailable because no binding is written. In a child-specific inspector, type ordinary guidance and press Enter to send it through the acknowledged steer channel; `steer <message>`, `status`, and `stop` remain available as explicit controls. The bundled Herdr plugin uses Herdr 0.7.5+.
 
 Without a TUI, `/subagents-fleet` retains the textual `subagent({ action: "status", view: "fleet" })` fallback, and mutations use explicit commands: run `/subagents-stop` and pick from the selector, or use `/subagents-stop <run-id>` / `subagent({ action: "stop", id: "..." })` when you already know the id.
 

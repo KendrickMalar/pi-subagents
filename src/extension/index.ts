@@ -58,6 +58,7 @@ import {
 	type SupervisorRequestMessageDetails,
 } from "../intercom/supervisor-ui.ts";
 import { registerHerdrStatusBridge, type HerdrStatusRun } from "../integrations/herdr-status.ts";
+import { registerProgramStatusReporter } from "../integrations/program-status.ts";
 import { hasLiveSubagentWork, registerPiWebSessionLiveness } from "../integrations/pi-web-session-liveness.ts";
 import { createRetainedNestedRouteTracker } from "../runs/background/retained-nested-route-tracker.ts";
 import { listHerdrProjectPaneRoots, restoreHerdrProjectPaneSnapshots } from "../inspectors/herdr/project-panes.ts";
@@ -69,6 +70,7 @@ import { registerSubagentToolActivation } from "./tool-activation.ts";
 import { createWaitSubscriptionManager } from "../runs/background/wait-subscriptions.ts";
 import { drainOutstandingWork } from "../runs/background/auto-drain.ts";
 import registerSubagentNotify, { parseSubagentNotifyContent, type SubagentNotifyDetails } from "../runs/background/notify.ts";
+import { createParentWake } from "../shared/parent-wake.ts";
 import { formatSteeringNotice, handleSubagentSteeringNotice, SUBAGENT_STEERING_MESSAGE_TYPE, type SubagentSteeringMessageDetails } from "./steering-notices.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_PARENT_SESSION_ENV } from "../runs/shared/child-runtime-config.ts";
 import { disposeChildSessions } from "../runs/shared/child-session.ts";
@@ -121,7 +123,7 @@ type SubagentExecutor = ReturnType<SubagentExecutorModule["createSubagentExecuto
 type SubagentExecutorDeps = Parameters<SubagentExecutorModule["createSubagentExecutor"]>[0];
 
 interface SubagentRuntimeEntry {
-	cleanup(): void;
+	cleanup(shutdownReason?: string): void;
 	sessionManager: object | null;
 	visibleControlNotices: Set<string>;
 }
@@ -380,14 +382,18 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		}, run);
 	};
 
+	// Every notice that wakes the parent goes through parentWake; the watchdog wakes only inside a run.
+	const parentWake = createParentWake(pi);
+	const wakingPi = { events: pi.events, sendMessage: parentWake.sendMessage, on: pi.on };
 	const supervisorChannel = createNativeSupervisorChannel(pi, state, {
 		// Owner states are created only by scheduled execution, which loads the executor first.
 		getCurrentOwnerStates: () => executor?.getCurrentSupervisorOwnerStates() ?? [],
+		parentWake,
 	});
-	const waitSubscriptionManager = createWaitSubscriptionManager(pi, state);
+	const waitSubscriptionManager = createWaitSubscriptionManager(wakingPi, state);
 	const mainWatchdog = registerMainWatchdog(pi);
 	const resultDeliveryOwnership = createResultDeliveryOwnership(state);
-	const completionNotifier = registerSubagentNotify(pi, state, { batchConfig: config.completionBatch, ownership: resultDeliveryOwnership });
+	const completionNotifier = registerSubagentNotify(wakingPi, state, { batchConfig: config.completionBatch, ownership: resultDeliveryOwnership });
 	// Ended async runs whose result has not reached the notifier yet.
 	const owedResultRunIds = new Set<string>();
 	// Tracked runs whose result was already delivered, so a later terminal
@@ -492,6 +498,12 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			agents: merged.agents.map((agent) => agent.maxThinking === discovered.maxThinking ? agent : { ...agent, maxThinking: discovered.maxThinking }),
 		};
 	};
+	const programStatus = registerProgramStatusReporter({
+		enabled: config.programStatus !== false,
+		// Fleet history keeps recent finished runs after the widget drops them.
+		getJobs: () => new Map([...(state.fleetJobs ?? []), ...state.asyncJobs]).values(),
+		getPendingRequests: () => supervisorChannel.pending.values(),
+	});
 	const { ensurePoller, refreshWidget, handleStarted, handleComplete, resetJobs, restoreActiveJobs, dispose: disposeAsyncJobTracker } = createAsyncJobTracker(pi, state, DIRS.async, {
 		widgetEnabled: asyncWidgetEnabled,
 		widgetCollapsed: asyncWidgetCollapsed,
@@ -501,6 +513,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		},
 		onJobCleanup: (asyncId) => deliveredRunIds.delete(asyncId),
 		supervisorRequestState: supervisorChannel.getSupervisorRequestState,
+		onJobsChanged: programStatus.sync,
 	});
 	const resultWatcher = createResultWatcher(
 		pi,
@@ -560,6 +573,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	const executorDeps: SubagentExecutorDeps = {
 		pi,
+		parentWake,
 		state,
 		config,
 		asyncByDefault,
@@ -813,7 +827,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 					const retainedChildren = listRetainedChildren(DIRS.async, ownerSessionId);
 					for (const notice of collectGoalContinuationNotices({ location, ownerSessionId, retainedChildren, turnId: goalTurnId })) {
 						handleSubagentControlNotice({
-							pi,
+							pi: parentWake,
 							state,
 							visibleControlNotices: new Set(),
 							details: { source: "goal", event: notice.event, noticeText: notice.message },
@@ -844,14 +858,14 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	});
 	const controlEventHandler = (payload: unknown) => {
 		handleSubagentControlNotice({
-			pi,
+			pi: parentWake,
 			state,
 			visibleControlNotices,
 			details: payload as SubagentControlMessageDetails,
 		});
 	};
 	const steeringNoticeHandler = (payload: unknown) => {
-		handleSubagentSteeringNotice({ pi, state, details: payload as SubagentSteeringMessageDetails });
+		handleSubagentSteeringNotice({ pi: parentWake, state, details: payload as SubagentSteeringMessageDetails });
 	};
 	const asyncStartedHandler = (payload: unknown) => {
 		handleStarted(payload);
@@ -1011,9 +1025,10 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const runtimeEntry: SubagentRuntimeEntry = {
 		sessionManager: null,
 		visibleControlNotices,
-		cleanup() {
+		cleanup(shutdownReason) {
 			if (runtimeCleaned) return;
 			runtimeCleaned = true;
+			programStatus.dispose(shutdownReason);
 			releaseHostSessionLiveness();
 			releaseHostSessionLiveness = () => {};
 			// Workflow continuations retain their launch context; abort them before
@@ -1107,14 +1122,17 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	};
 
 	pi.on("agent_start", () => {
+		parentWake.agentStarted();
 		resumeWidgetsAfterCompaction();
 		herdrStatusBridge.agentStarted();
+		programStatus.agentStarted();
 	});
 
 	pi.on("message_start", (event) => completionNotifier.messageStarted(event.message));
 
 	pi.on("agent_settled", () => {
 		resumeWidgetsAfterCompaction();
+		programStatus.agentSettled();
 	});
 
 	pi.on("session_before_compact", (event) => {
@@ -1125,7 +1143,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		if (event.reason !== "manual") return;
 		const hasActiveAsyncWork = [...state.asyncJobs.values()].some((job) => job.status === "queued" || job.status === "running");
 		if (!hasActiveAsyncWork || !withLastUiContext(() => true)) return;
-		pi.sendMessage(
+		parentWake.sendMessage(
 			{
 				customType: "subagent-compaction-resume",
 				content: "Compaction is complete. Resume the parent task now; background subagent results will arrive separately when ready.",
@@ -1136,6 +1154,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", (event, ctx) => {
+		parentWake.bindSession(ctx);
+		completionNotifier.bindSession(ctx.sessionManager);
 		installRuntime(ctx);
 		startSessionMaintenance();
 		scheduleModulePreload();
@@ -1148,7 +1168,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			? registerPiWebSessionLiveness({
 				sessionId,
 				...(sessionFile ? { sessionFile } : {}),
-				isActive: () => owedResultRunIds.size > 0 || hasLiveSubagentWork(state) || completionNotifier.hasPendingDelivery(),
+				isActive: () => owedResultRunIds.size > 0 || hasLiveSubagentWork(state) || completionNotifier.hasPendingDelivery() || parentWake.isPending(),
 			})
 			: { registered: false, release: () => {} };
 		releaseHostSessionLiveness = liveness.release;
@@ -1160,13 +1180,16 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			hasUI: ctx.hasUI === true,
 			runs: activeHerdrRuns(),
 		});
+		programStatus.sessionStarted({ hasUI: ctx.hasUI === true, mode: ctx.mode });
 		rpcBridge.emitReady(ctx);
 		supervisorChannel.start();
 		supervisorChannel.activateTransport();
 	});
 
-	pi.on("session_shutdown", async () => {
-		runtimeEntry.cleanup();
+	pi.on("session_shutdown", async (event) => {
+		completionNotifier.sessionShutdown(event?.reason);
+		parentWake.sessionShutdown(event?.reason);
+		runtimeEntry.cleanup(event?.reason);
 		try {
 			await disposeChildSessions();
 		} catch (error) {

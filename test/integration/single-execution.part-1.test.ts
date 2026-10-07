@@ -1936,6 +1936,8 @@ Answer only from the supplied synthetic text.
 				{ workflowKey: "stage2", runId: undefined, reused: undefined },
 			]);
 			assert.ok(relaunched.workflow?.trace.some((entry) => entry.key === "stage1" && entry.state === "completed" && entry.reused === true));
+			const reusedRow = relaunched.steps?.find((step) => step.workflowKey === "stage1");
+			assert.deepEqual({ tokens: reusedRow?.tokens, turnCount: reusedRow?.turnCount }, { tokens: { input: 100, output: 50, total: 150 }, turnCount: 1 });
 		});
 
 		it("relaunches failed children, and a user stop records no stop cause and ends reuse", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
@@ -2001,6 +2003,11 @@ Answer only from the supplied synthetic text.
 				{ workflowKey: "stage3", reused: undefined },
 			]);
 			assert.equal(relaunched.steps?.[1]?.runId, stage2RunId);
+			assert.deepEqual(relaunched.steps?.map(({ workflowKey, tokens, turnCount }) => ({ workflowKey, total: tokens?.total, turnCount })), [
+				{ workflowKey: "stage1", total: 150, turnCount: 1 },
+				{ workflowKey: "stage2", total: 150, turnCount: 1 },
+				{ workflowKey: "stage3", total: 150, turnCount: 1 },
+			]);
 			assert.equal(fs.existsSync(path.join(DIRS.async, stage2RunId, "workflow-result.json")), false, "the relaunch consumes the awaited result like the normal path");
 		});
 
@@ -2878,6 +2885,27 @@ Answer only from the supplied synthetic text.
 		assert.deepEqual(persisted.results?.map((entry) => entry.error), ["Subagent timed out after 150ms."]);
 		fs.rmSync(childDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 		fs.rmSync(childResultPath, { force: true });
+	});
+
+	it("carries workflow child usage onto the parent's step rows", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "detached child", matchArgIncludes: "Detached" });
+		mockPi.onCall({ output: "in-process child", matchArgIncludes: "In process" });
+		const started = await makeExecutor([makeAgent("echo")], {}, true).execute(
+			`scripted-workflow-child-usage-${Date.now()}`,
+			{ workflowScript: `const [a, b] = await runs.all([{ key: "detached", agent: "echo", task: "Detached" }, { key: "inline", agent: "echo", task: "In process", async: false }]); return a.runId;` },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const status = await waitForAsyncState(started.details.asyncId!, (candidate) => ["complete", "failed", "stopped"].includes(candidate.state ?? ""), 60_000) as AsyncStatus;
+		assert.equal(status.state, "complete");
+		const detachedStatus = JSON.parse(fs.readFileSync(path.join(DIRS.async, status.workflow?.value as string, "status.json"), "utf-8")) as AsyncStatus;
+		const rows = Object.fromEntries((status.steps ?? []).map((step) => [step.workflowKey, { tokens: step.tokens, turnCount: step.turnCount }]));
+		const { input, output, total } = detachedStatus.totalTokens!;
+		assert.deepEqual(rows.detached?.tokens, { input, output, total });
+		assert.equal(rows.detached?.turnCount, detachedStatus.steps?.[0]?.turnCount);
+		assert.ok((rows.inline?.tokens?.total ?? 0) > 0);
+		assert.equal((rows.detached?.tokens?.total ?? 0) + (rows.inline?.tokens?.total ?? 0), status.totalTokens?.total);
 	});
 
 	it("persists workflow parent metadata in an async worktree child status and result", { skip: !createSubagentExecutor || process.platform === "win32" ? "executor unavailable or worktree paths differ on Windows" : undefined }, async () => {
@@ -3865,6 +3893,153 @@ Answer only from the supplied synthetic text.
 		assert.ok(pathContainsSegments(outputPaths[1]!, "artifacts", "outputs"));
 		assert.equal(path.basename(outputPaths[1]!), "second.md");
 		assert.equal(fs.readFileSync(outputPaths[1]!, "utf-8"), "second report");
+	});
+
+	it("gives an output-less resume of an earlier workflow stage its own default output", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const applyPath = path.join(tempDir, "apply.md");
+		mockPi.onCall({ output: "apply report" });
+		mockPi.onCall({ output: "deslop report" });
+		const result = await makeExecutor([makeAgent("echo")]).execute(
+			"scripted-workflow-resume-without-output",
+			{
+				async: false,
+				workflowScript: `
+					const apply = await runs.run("apply", { agent: "echo", task: "Apply", acceptance: false, output: ${JSON.stringify(applyPath)} });
+					const deslop = await runs.run("deslop", { resume: apply.runId, task: "Deslop" });
+					return [apply, deslop];
+				`,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined, result.content[0]?.text ?? "workflow failed");
+		const children = result.details.workflow?.value as Array<{ ok: boolean }>;
+		assert.deepEqual(children.map(({ ok }) => ok), [true, true]);
+		assert.equal(fs.readFileSync(applyPath, "utf-8"), "apply report");
+		const deslopPath = result.details.results[1]?.savedOutputPath ?? "";
+		assert.ok(pathContainsSegments(deslopPath, "artifacts", "outputs"));
+		assert.equal(path.basename(deslopPath), "deslop.md");
+		assert.equal(fs.readFileSync(deslopPath, "utf-8"), "deslop report");
+	});
+
+	it("keeps an explicit output: true resume of an earlier workflow stage launchable", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const applyPath = path.join(tempDir, "apply.md");
+		mockPi.onCall({ output: "apply report" });
+		mockPi.onCall({ output: "deslop report" });
+		const result = await makeExecutor([makeAgent("echo")]).execute(
+			"scripted-workflow-resume-output-true",
+			{
+				async: false,
+				workflowScript: `
+					const apply = await runs.run("apply", { agent: "echo", task: "Apply", acceptance: false, output: ${JSON.stringify(applyPath)} });
+					const deslop = await runs.run("deslop", { resume: apply.runId, task: "Deslop", output: true });
+					return [apply, deslop];
+				`,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined, result.content[0]?.text ?? "workflow failed");
+		assert.deepEqual((result.details.workflow?.value as Array<{ ok: boolean }>).map(({ ok }) => ok), [true, true]);
+	});
+
+	it("reroutes a later output-less resume of a stage that reused an outside run's report path", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const outsidePath = path.join(tempDir, "outside.md");
+		const executor = makeExecutor([makeAgent("echo")]);
+		const ctx = makeMinimalCtx(tempDir);
+		mockPi.onCall({ output: "outside report" });
+		const outside = await executor.execute(
+			"outside-foreground-run",
+			{ async: false, workflowScript: `return runs.run("outside", { agent: "echo", task: "Outside", acceptance: false, output: ${JSON.stringify(outsidePath)} });` },
+			new AbortController().signal, undefined, ctx,
+		);
+		const outsideRunId = (outside.details.workflow?.value as { runId: string }).runId;
+		mockPi.onCall({ output: "apply report" });
+		mockPi.onCall({ output: "deslop report" });
+		const result = await executor.execute(
+			"scripted-workflow-chained-resume-without-output",
+			{
+				async: false,
+				workflowScript: `
+					const apply = await runs.run("apply", { resume: ${JSON.stringify(outsideRunId)}, task: "Apply" });
+					const deslop = await runs.run("deslop", { resume: apply.runId, task: "Deslop" });
+					return [apply, deslop];
+				`,
+			},
+			new AbortController().signal, undefined, ctx,
+		);
+
+		assert.equal(result.isError, undefined, result.content[0]?.text ?? "workflow failed");
+		assert.equal(fs.readFileSync(outsidePath, "utf-8"), "apply report");
+		const deslopPath = result.details.results[1]?.savedOutputPath ?? "";
+		assert.equal(path.basename(deslopPath), "deslop.md");
+		assert.equal(fs.readFileSync(deslopPath, "utf-8"), "deslop report");
+	});
+
+	it("gives an output-less retained resume its own default output when an earlier stage owns its report path", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const retainedRunId = `retained-claimed-output-${Date.now()}`;
+		const retainedAsyncDir = path.join(DIRS.async, retainedRunId);
+		const retainedSessionFile = path.join(tempDir, "retained-session.jsonl");
+		const applyPath = path.join(tempDir, "apply.md");
+		const runFanoutBudget = createRunFanoutBudget(retainedRunId, 10);
+		fs.mkdirSync(retainedAsyncDir, { recursive: true });
+		fs.writeFileSync(retainedSessionFile, "{}\n", "utf-8");
+		fs.writeFileSync(path.join(retainedAsyncDir, "status.json"), JSON.stringify({
+			runId: retainedRunId,
+			sessionId: "session-123",
+			state: "complete",
+			cwd: tempDir,
+			sessionFile: retainedSessionFile,
+			steps: [{ agent: "echo", status: "complete", sessionFile: retainedSessionFile }],
+		}), "utf-8");
+		fs.writeFileSync(path.join(retainedAsyncDir, "recovery-descriptor.json"), JSON.stringify({
+			version: 1,
+			runFanoutBudget,
+			sourceRunId: retainedRunId,
+			agent: "echo",
+			cwd: tempDir,
+			systemPromptMode: "append",
+			inheritProjectContext: true,
+			inheritSkills: true,
+			outputPath: applyPath,
+			outputMode: "inline",
+			maxSubagentDepth: 1,
+			share: false,
+		}), "utf-8");
+		mockPi.onCall({ output: "apply report", matchArgIncludes: "Apply" });
+		mockPi.onCall({ output: "deslop report", matchArgIncludes: "Deslop" });
+
+		try {
+			const result = await makeExecutor([makeAgent("echo")]).execute(
+				"scripted-workflow-retained-resume-claimed-output",
+				{
+					async: false,
+					workflowScript: `
+						const apply = await runs.run("apply", { agent: "echo", task: "Apply", acceptance: false, output: ${JSON.stringify(applyPath)} });
+						const deslop = await runs.run("deslop", { resume: ${JSON.stringify(retainedRunId)}, task: "Deslop" });
+						return [apply, deslop];
+					`,
+				},
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, undefined, result.content[0]?.text ?? "workflow failed");
+			const children = result.details.workflow?.value as Array<{ ok: boolean }>;
+			assert.deepEqual(children.map(({ ok }) => ok), [true, true]);
+			assert.equal(fs.readFileSync(applyPath, "utf-8"), "apply report");
+			const deslopPath = result.details.results[1]?.savedOutputPath ?? "";
+			assert.equal(path.basename(deslopPath), "deslop.md");
+			assert.equal(fs.readFileSync(deslopPath, "utf-8"), "deslop report");
+		} finally {
+			fs.rmSync(retainedAsyncDir, { recursive: true, force: true });
+			fs.rmSync(runFanoutBudget.directory, { recursive: true, force: true });
+		}
 	});
 
 	it("preserves a rejected file-only child report when its path matches workflow output", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

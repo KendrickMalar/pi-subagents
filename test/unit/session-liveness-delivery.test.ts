@@ -73,7 +73,7 @@ const terminalBeforePublicationScript = String.raw`
 		register(value) { provider = value; return () => {}; },
 	};
 	const ctx = {
-		cwd: process.cwd(), hasUI: false, model: undefined,
+		cwd: process.cwd(), hasUI: false, model: undefined, isIdle() { return false; },
 		ui: { setWidget() {}, requestRender() {}, theme: { fg(_name, text) { return text; }, bg(_name, text) { return text; }, bold(text) { return text; } } },
 		sessionManager: { getSessionId() { return sessionId; }, getSessionFile() { return null; }, getEntries() { return []; } },
 		modelRegistry: { getAvailable() { return []; } },
@@ -255,6 +255,94 @@ describe("session liveness through result delivery", () => {
 				else process.env.PI_SUBAGENT_PARENT_SESSION = previousParentSession;
 				fs.rmSync(root, { recursive: true, force: true });
 			}
+		}
+	});
+
+	it("preserves an idle parent's completion wake across actual SDK reload until the woken run starts", { timeout: 30_000 }, async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-session-liveness-reload-"));
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(agentDir);
+		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		const registryKey = Symbol.for(PI_WEB_SESSION_LIVENESS_REGISTRY_KEY);
+		const globals = globalThis as Record<PropertyKey, unknown>;
+		const previousRegistry = globals[registryKey];
+		let provider: { isActive(): boolean } | undefined;
+		let registrations = 0;
+		globals[registryKey] = {
+			version: 1,
+			register(value: { isActive(): boolean }) {
+				registrations++;
+				provider = value;
+				return () => { if (provider === value) provider = undefined; };
+			},
+		};
+		const sessionManager = SessionManager.inMemory(root);
+		const sessionId = sessionManager.getSessionId();
+		const faux = fauxProvider({ provider: "liveness-reload", models: [{ id: "local" }], tokensPerSecond: 100_000 });
+		faux.setResponses([
+			() => fauxAssistantMessage("Yielded original turn."),
+			() => fauxAssistantMessage("Processed completion after reload."),
+		]);
+		let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+		let reloaded = false;
+		// Hook errors after reload never reach onError, so record observations and assert after the prompt.
+		let observed: Record<string, unknown> | undefined;
+		const settingsManager = SettingsManager.inMemory({});
+		const errors: unknown[] = [];
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: root, agentDir, settingsManager,
+			noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+			extensionFactories: [registerSubagentExtension, (api) => {
+				api.registerProvider(faux.provider);
+				api.on("agent_settled", async () => {
+					if (reloaded) return;
+					reloaded = true;
+					api.events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+						id: "reload-wake", sessionId, completionOwnerId: currentCompletionOwnerId(),
+						success: false, summary: "Review requires the parent.",
+					});
+					const activeBeforeReload = provider?.isActive();
+					await session!.reload();
+					observed = {
+						activeBeforeReload,
+						registrations,
+						isIdle: session!.isIdle,
+						pendingMessageCount: session!.pendingMessageCount,
+						noticeAppended: session!.messages.some((message) => message.role === "custom" && message.customType === "subagent-notify"),
+						activeAfterReload: provider?.isActive(),
+					};
+				});
+			}],
+		});
+		try {
+			await resourceLoader.reload();
+			const modelRuntime = await ModelRuntime.create({ authPath: path.join(agentDir, "auth.json"), modelsPath: path.join(agentDir, "models.json"), allowModelNetwork: false });
+			({ session } = await createAgentSession({ cwd: root, agentDir, settingsManager, resourceLoader, modelRuntime, model: faux.getModel("local"), sessionManager, noTools: "builtin" }));
+			// With no bindings, SDK reload skips session_start. Bind an error listener
+			// to exercise the real reload lifecycle.
+			await session.bindExtensions({ onError: (error) => { errors.push(error); } });
+			await session.prompt("Yield with a completion pending.");
+			assert.equal(reloaded, true);
+			assert.deepEqual(errors, []);
+			assert.deepEqual(observed, {
+				activeBeforeReload: true,
+				registrations: 2, // reload actually bound the replacement producer
+				isIdle: true,
+				pendingMessageCount: 0, // Pi's deferred settled action is not counted as a pending message
+				noticeAppended: true, // the idle parent gets the notice now and a prompt that wakes it
+				activeAfterReload: true, // the retained wake prompt owns liveness until its deferred run starts
+			});
+			assert.equal(provider?.isActive(), false, "the woken run releases the retained wake");
+			assert.equal(session.getLastAssistantText(), "Processed completion after reload.");
+		} finally {
+			if (session) await (session.extensionRunner as unknown as { emit(event: unknown): Promise<unknown> }).emit({ type: "session_shutdown", reason: "quit" });
+			session?.dispose();
+			if (previousRegistry === undefined) delete globals[registryKey];
+			else globals[registryKey] = previousRegistry;
+			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 });

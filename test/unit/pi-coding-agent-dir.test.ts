@@ -291,6 +291,10 @@ Package skill content.
 		assert.equal(loadConfig().asyncWidgetCollapsed, true);
 		writeFile(configPath, JSON.stringify({ asyncWidgetCollapsed: "true" }));
 		assert.deepEqual(loadConfig(), {});
+		writeFile(configPath, JSON.stringify({ programStatus: false }));
+		assert.equal(loadConfig().programStatus, false);
+		writeFile(configPath, JSON.stringify({ programStatus: "off" }));
+		assert.throws(() => updateConfig((config) => config), /config\.programStatus must be a boolean/);
 
 		writeFile(configPath, JSON.stringify({ defaultSubagentContext: "other" }));
 		assert.throws(() => updateConfig((config) => config), /config\.defaultSubagentContext must be "fresh" or "fork"/);
@@ -315,6 +319,19 @@ Package skill content.
 		const configPath = path.join(agentDir, "extensions", "subagent", "config.json");
 		writeFile(configPath, JSON.stringify({ disabledFeatures: ["watchdogs"] }));
 		assert.throws(() => loadConfig(), /config\.disabledFeatures entry "watchdogs" is not one of:/);
+	});
+
+	it("loads runnerLaunchers and fails closed on malformed launchers or other invalid values", () => {
+		const configPath = path.join(agentDir, "extensions", "subagent", "config.json");
+		const runnerLaunchers = { net: ["nono", "run", "--profile", " net ", "--"], "subagent-net": ["subagent-net"], "net.v2_x-1": ["wrap"] };
+		writeFile(configPath, JSON.stringify({ runnerLaunchers }));
+		assert.deepEqual(loadConfig().runnerLaunchers, runnerLaunchers);
+		for (const invalid of [[], "nono", { net: [] }, { net: "nono run" }, { net: [""] }, { net: [" "] }, { net: ["nono", 1] }, { net: ["no\u0000no"] }, { "": ["nono"] }, { "'net'": ["nono"] }, { "a b": ["nono"] }, { "-x": ["nono"] }, { ["n".repeat(129)]: ["nono"] }]) {
+			writeFile(configPath, JSON.stringify({ runnerLaunchers: invalid }));
+			assert.throws(() => loadConfig(), /config\.runnerLaunchers.*(?:letters, digits|argv array|JSON object)/);
+		}
+		writeFile(configPath, JSON.stringify({ resultScanLogging: "bogus", runnerLaunchers }));
+		assert.throws(() => loadConfig(), /config\.resultScanLogging must be/);
 	});
 
 	it("fails config load for invalid scheduledRuns because it controls the tool schema", () => {

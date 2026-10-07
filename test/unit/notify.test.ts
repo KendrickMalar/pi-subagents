@@ -6,10 +6,12 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import registerSubagentNotify, {
 	buildCompletionDetails,
 	createCompletionSendRegistry,
 	formatGroupedCompletion,
+	type CompletionNotifier,
 	formatSingleCompletion,
 	parseSubagentNotifyContent,
 	type RegisterSubagentNotifyOptions,
@@ -19,8 +21,90 @@ import registerSubagentNotify, {
 } from "../../src/runs/background/notify.ts";
 import { SUBAGENT_ASYNC_COMPLETE_EVENT, SUBAGENT_FOREGROUND_COMPLETE_EVENT } from "../../src/shared/types.ts";
 import { createResultDeliveryOwnership } from "../../src/runs/background/result-delivery-ownership.ts";
+import { createParentWake } from "../../src/shared/parent-wake.ts";
 
 const COMPLETION_OWNER_ID = "completion-owner-a";
+const completionContent = (content: string) => `${content}\n\nParent action: Read the saved results above and resume the already-authorized parent task, or report completion. If approval is required, explicitly ask the user. Do not silently yield, rerun completed work, or infer new authorization.`;
+
+it("keeps reload wakes scoped to one session manager and clears them on quit", async () => {
+	const owner = SessionManager.inMemory();
+	const sessionId = owner.getSessionId();
+	const otherOwner = { getSessionId: () => sessionId };
+	const create = (sessionManager: Parameters<CompletionNotifier["bindSession"]>[0]) => {
+		const messages: any[] = [];
+		const pi = {
+			events: createEventBus(),
+			sendMessage(message: unknown) { messages.push(message); },
+		} as unknown as Parameters<typeof registerSubagentNotify>[0];
+		const notifier = registerSubagentNotify(pi, { currentSessionId: sessionId, completionOwnerId: COMPLETION_OWNER_ID }, { batchConfig: { enabled: false } });
+		notifier.bindSession(sessionManager);
+		return { notifier, messages };
+	};
+	const first = create(owner);
+	await first.notifier.deliver({ id: "queued-wake-scope-result", sessionId, completionOwnerId: COMPLETION_OWNER_ID, success: false, summary: "Needs attention" });
+	assert.equal(first.notifier.hasPendingDelivery(), true);
+	first.notifier.sessionShutdown("reload");
+	first.notifier.dispose();
+	const other = create(otherOwner);
+	const replacement = create(owner);
+	assert.equal(other.notifier.hasPendingDelivery(), false, "even the same session ID on a different manager must not inherit another queue");
+	assert.equal(replacement.notifier.hasPendingDelivery(), true);
+	other.notifier.messageStarted({ role: "custom", ...first.messages[0] });
+	assert.equal(replacement.notifier.hasPendingDelivery(), true, "foreign consumption cannot clear the owner's wake");
+	replacement.notifier.messageStarted({ role: "custom", ...first.messages[0] });
+	assert.equal(replacement.notifier.hasPendingDelivery(), false);
+	await replacement.notifier.deliver({ id: "queued-wake-quit-result", sessionId, completionOwnerId: COMPLETION_OWNER_ID, success: false, summary: "Another wake" });
+	replacement.notifier.sessionShutdown("quit");
+	replacement.notifier.dispose();
+	const reopened = create(owner);
+	assert.equal(reopened.notifier.hasPendingDelivery(), false, "quit clears wakes even if a manager is reused");
+	await reopened.notifier.deliver({ id: "queued-wake-switch-result", sessionId, completionOwnerId: COMPLETION_OWNER_ID, success: false, summary: "Old session wake" });
+	assert.equal(reopened.notifier.hasPendingDelivery(), true);
+	owner.newSession();
+	assert.notEqual(owner.getSessionId(), sessionId);
+	reopened.notifier.bindSession(owner);
+	assert.equal(reopened.notifier.hasPendingDelivery(), false, "changing session UUID on the same manager must discard old wakes");
+	reopened.notifier.dispose();
+	other.notifier.dispose();
+});
+
+it("keeps wakes accepted before the first session bind", async () => {
+	const owner = SessionManager.inMemory();
+	const sessionId = owner.getSessionId();
+	const messages: any[] = [];
+	const pi = {
+		events: createEventBus(),
+		sendMessage(message: unknown) { messages.push(message); },
+	} as unknown as Parameters<typeof registerSubagentNotify>[0];
+	const first = registerSubagentNotify(pi, { currentSessionId: sessionId, completionOwnerId: COMPLETION_OWNER_ID }, { batchConfig: { enabled: false } });
+	first.bindSession(owner);
+	first.sessionShutdown("reload");
+	first.dispose();
+	const replacement = registerSubagentNotify(pi, { currentSessionId: sessionId, completionOwnerId: COMPLETION_OWNER_ID }, { batchConfig: { enabled: false } });
+	await replacement.deliver({ id: "queued-wake-before-bind", sessionId, completionOwnerId: COMPLETION_OWNER_ID, success: false, summary: "Early wake" });
+	replacement.bindSession(owner);
+	assert.equal(replacement.hasPendingDelivery(), true, "binding must not drop a wake accepted before session_start");
+	replacement.messageStarted({ role: "custom", ...messages[0] });
+	assert.equal(replacement.hasPendingDelivery(), false);
+	replacement.dispose();
+});
+
+it("does not wait for message_start on a completion appended to an idle parent", async () => {
+	const owner = SessionManager.inMemory();
+	const sessionId = owner.getSessionId();
+	const calls: unknown[][] = [];
+	const parentWake = createParentWake({
+		sendMessage: (...args: unknown[]) => { calls.push(args); },
+		sendUserMessage: (...args: unknown[]) => { calls.push(args); },
+	} as never);
+	parentWake.bindSession({ isIdle: () => true, sessionManager: owner } as never);
+	const notifier = registerSubagentNotify({ events: createEventBus(), sendMessage: parentWake.sendMessage }, { currentSessionId: sessionId, completionOwnerId: COMPLETION_OWNER_ID }, { batchConfig: { enabled: false } });
+	notifier.bindSession(owner);
+	await notifier.deliver({ id: "idle-wake-result", sessionId, completionOwnerId: COMPLETION_OWNER_ID, success: false, summary: "Needs attention" });
+	assert.deepEqual(calls.map((call) => call[1]), [{ triggerTurn: false }, { deliverAs: "steer" }]);
+	assert.equal(notifier.hasPendingDelivery(), false, "Pi emits no message_start for an appended notice; the wake prompt holds liveness");
+	notifier.dispose();
+});
 
 it("does not deliver awaited workflow child lifecycle completions", async () => {
 	const { events, sent, dispose } = createPi();
@@ -311,7 +395,7 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: "Background task completed: **worker**\n\n(no output)",
+				content: completionContent("Background task completed: **worker**\n\n(no output)"),
 				display: false,
 			},
 			options: { triggerTurn: true },
@@ -425,7 +509,7 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: "Detached foreground task completed: **reviewer**\n\nRecovered final review",
+				content: completionContent("Detached foreground task completed: **reviewer**\n\nRecovered final review"),
 				display: true,
 			},
 			options: { triggerTurn: true },
@@ -467,7 +551,7 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: `Background task completed: **worker** (2/3)\n\n${summary}`,
+				content: completionContent(`Background task completed: **worker** (2/3)\n\n${summary}`),
 				display: false,
 			},
 			options: { triggerTurn: true },
@@ -492,7 +576,7 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent, [{
 			message: {
 				customType: "subagent-notify",
-				content: "Background task completed: **worker**\n\nDone\n\nSession file: /tmp/session.jsonl",
+				content: completionContent("Background task completed: **worker**\n\nDone\n\nSession file: /tmp/session.jsonl"),
 				display: false,
 			},
 			options: { triggerTurn: true },
@@ -517,7 +601,7 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: "Background task paused: **worker**\n\nPaused after interrupt. Waiting for explicit next action.",
+				content: completionContent("Background task paused: **worker**\n\nPaused after interrupt. Waiting for explicit next action."),
 				display: true,
 			},
 			options: { triggerTurn: true },
@@ -545,7 +629,7 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: "Background task paused: **workflow**\n\nRun 'detaches' detached for intercom coordination.\n\nChild outputs:\n- key=detaches run=child-1 status=paused\n  Saved output: unavailable\n  Preview: unavailable (no safe inline output)\n\nWorkflow run: workflow-1\nChild runs: detaches=child-1 (paused)",
+				content: completionContent("Background task paused: **workflow**\n\nRun 'detaches' detached for intercom coordination.\n\nChild outputs:\n- key=detaches run=child-1 status=paused\n  Saved output: unavailable\n  Preview: unavailable (no safe inline output)\n\nWorkflow run: workflow-1\nChild runs: detaches=child-1 (paused)"),
 				display: true,
 			},
 			options: { triggerTurn: true },

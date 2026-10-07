@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### Added
+
+- Background children could only run in the parent's sandbox unless they gave up native steering and results by using an external CLI runner. An agent can now set `launcher:` to a command defined in the user config's `runnerLaunchers`, such as a sandbox, which wraps its background runner; steering, supervisor questions, stop, resume and results keep working. Thanks to [@aaronkyriesenbach](https://github.com/aaronkyriesenbach) for the idea, design and nono testing. ([#2577](https://github.com/nicobailon/pi-subagents/issues/2577))
+- A terminal could not tell which background subagent runs were working, waiting on the user, finished, or failed without reading the screen. Each run's state is now reported with OSC 7501, the Program Status Protocol, which terminals such as Ghostty can show; set `programStatus: false` to turn it off. ([#2724](https://github.com/nicobailon/pi-subagents/issues/2724))
+- Fleet's `Enter`/`H` inspector needed Herdr or Ghostty, so tmux users had to write their own provider. A bundled `tmux` inspector now opens the read-only inspector in a split pane of the current tmux window, with status and close support. Thanks to [@tobymao](https://github.com/tobymao) for the plugin. ([#2719](https://github.com/nicobailon/pi-subagents/pull/2719))
+
+### Fixed
+
+- RPC stop refused queued and paused async runs, which the `subagent` tool's own stop action already handles. RPC stop now uses the tool's stop policy, with the same session and process-proof checks. Thanks to [@alexei-led](https://github.com/alexei-led) for the fix (split from [#2717](https://github.com/nicobailon/pi-subagents/pull/2717)).
+- A parent could wake for a supervisor decision or finished workflow, return an empty response, and leave delegated work unhandled until the operator sent another message. Wake instructions now explicitly request result handling within existing authority. Silent supervisor and completion wakes receive one bounded continuation, then a short blocked/unhandled notice instead of silent settlement or an automatic approval. Visible replies, including user approval requests, do not force another turn. Settle hooks run only while an unanswered wake remains, adding no idle settlement work. Thanks to @CamAnNguyen for [#2716](https://github.com/nicobailon/pi-subagents/pull/2716).
+- An RPC client that lost the spawn reply for a direct async run could not find the run by its tool-call ID once the result was delivered. Direct runs now keep the tool-call ID for status lookup after delivery, and an ID shared by a live run and a finished run is reported as ambiguous. Thanks to [@alexei-led](https://github.com/alexei-led) for [#2717](https://github.com/nicobailon/pi-subagents/pull/2717).
+
+- A long-running foreground child re-formatted every past tool call on each progress update, although progress shows only the latest 64, so each update got slower as the child's history grew. Progress updates now format only those 64 calls. ([#2704](https://github.com/nicobailon/pi-subagents/issues/2704))
+- Fleet reread and re-rendered the selected transcript every 750 ms even when it had not changed, which took hundreds of milliseconds per refresh for a long transcript. It now reuses the rendered transcript until the file, selection, width or tool view changes. ([#2705](https://github.com/nicobailon/pi-subagents/issues/2705))
+- A Herdr-placed Pi child's bridge kept every frame it received, so a healthy run failed and started reconnecting after its 1,024th frame. Frames are now released once the session has taken them. ([#2706](https://github.com/nicobailon/pi-subagents/issues/2706))
+- A workflow stage that resumed an earlier stage without its own `output` reused the earlier stage's report path, so it failed before launch when the earlier stage ran as a detached background child and overwrote the earlier report otherwise. It now writes to its own default report path. ([#2711](https://github.com/nicobailon/pi-subagents/issues/2711))
+- The `subagent` tool schema marked the `reviewed` value of `acceptance` with `deprecated: true`, which strict tool-schema validators reject with HTTP 400, so the tool failed for those providers. The schema no longer emits `deprecated`. Thanks to [@kingofdies](https://github.com/kingofdies) for the report. ([#2713](https://github.com/nicobailon/pi-subagents/issues/2713))
+- A background workflow's child rows showed no token usage or turn count, although each child's own status had them and the workflow total was their sum. Each child row now carries the usage and turn count from that child's settled result. Thanks to [@moxuun](https://github.com/moxuun) for the report. ([#2715](https://github.com/nicobailon/pi-subagents/issues/2715))
+- Two inspector opens for the same run or child at once, for example from Fleet and a tool call or from two Pi processes, could each open a pane and save a binding, so one pane could no longer be reached by `inspector.status` or `inspector.close`, and a close racing an open could miss the pane the open created. Open and close for the same run or child now wait for each other, across processes too. ([#2727](https://github.com/nicobailon/pi-subagents/issues/2727))
+
+## [0.76.1] - 2026-10-05
+
+### Highlights
+
+- When a subagent result wakes an idle parent, that run keeps the subagent list, MCP servers, and other extensions' prompt sections, and no longer churns the provider's prompt cache.
+- Updating pi-subagents while Pi is running now stops `/reload` with a clear "restart Pi" error instead of running a mix of old and new code.
+- In Herdr, a child asking its parent agent for help no longer turns the pane red.
+- `stop` works on a paused run whose result was already delivered, and `subagent doctor` now shows the same async capacity that launches use.
+- Reloading extensions while a child's result is waiting no longer lets a host such as pi-web lose that result.
+
+### Changed
+
+- The npm package now has the `extension` keyword, so Pi's extension catalog lists pi-subagents under Extensions instead of Unlabelled.
+
+### Fixed
+
+- When a subagent result, supervisor question, or other notice woke an idle parent, the run it started skipped Pi's normal prompt setup. From its second request on, it lost the subagent list, the MCP server list, and other extensions' prompt sections, and the changing prompt could invalidate the provider's prompt cache. The parent now gets the notice followed by a short `Subagent updates above.` message, which starts the run the normal way. Thanks to [@ashlineldridge](https://github.com/ashlineldridge) for [#2688](https://github.com/nicobailon/pi-subagents/issues/2688).
+- Reloading extensions while a child's result was waiting in Pi's queue made the session look idle, so a host such as pi-web could replace the session and lose the result. The session now stays busy until Pi picks up the result. Thanks to [@brettinternet](https://github.com/brettinternet) for [#2687](https://github.com/nicobailon/pi-subagents/pull/2687).
+- After pi-subagents was updated while Pi was running, `/reload` ran a mix of old and new code and failed with errors such as `completionNotifier.messageStarted is not a function`. Node cannot reload a module it has already imported, so loading now stops with an error that names both versions and asks you to restart Pi. Thanks to [@TheAsda](https://github.com/TheAsda) for [#2695](https://github.com/nicobailon/pi-subagents/issues/2695).
+- Child system prompts started with pi-subagents' own instructions instead of Pi's base prompt. Providers and extensions that recognize Pi's default prompt by its first sentence then sent `systemPromptMode: append` children Pi's whole prompt unchanged. Pi's prompt now comes first. ([#2692](https://github.com/nicobailon/pi-subagents/issues/2692))
+- When a per-tool timeout stopped a foreground child, its output said `Subagent timed out after <run timeout>ms.` (or `0ms` when no run timeout was set), naming a deadline that never fired. It now names the tool timeout, for example `Tool 'find' exceeded its timeout of 300000ms.` Thanks to [@mannainsect](https://github.com/mannainsect) for [#2691](https://github.com/nicobailon/pi-subagents/issues/2691).
+- `stop` failed with `paused result is missing` on a paused run whose result had already been delivered or was never written, and a finished parent workflow kept that run's async capacity slot. When the run's process has exited, `stop` now marks it stopped and the slot is freed. Thanks to [@builtroller](https://github.com/builtroller) for reporting [#2699](https://github.com/nicobailon/pi-subagents/issues/2699).
+- `subagent doctor` could report `usage: 0/3 used` while launches were rejected with `3/3 used`, for example in a session resumed with `pi --session <id>`, because doctor counted a different capacity pool than launches do. It now reads the same pool for both active async capacity and the spawn budget. Thanks to [@builtroller](https://github.com/builtroller) for reporting [#2698](https://github.com/nicobailon/pi-subagents/issues/2698).
+- In Herdr, the pane turned red, which means a person needs to act, whenever an async child needed attention, including a child waiting for its parent agent's answer. Those requests go to the parent agent, so pi-subagents no longer marks the pane blocked; the `⚠` in the pane's subagent label still shows it. Thanks to [@nateberkopec](https://github.com/nateberkopec) for reporting [#2702](https://github.com/nicobailon/pi-subagents/issues/2702).
+
 ## [0.76.0] - 2026-10-04
 
 ### Highlights
