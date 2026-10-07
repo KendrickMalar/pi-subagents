@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { describe, it } from "node:test";
 import { createResultWatcher } from "../../src/runs/background/result-watcher.ts";
 import { createAsyncJobTracker } from "../../src/runs/background/async-job-tracker.ts";
@@ -16,16 +17,141 @@ function fileBarrier(file: string): Promise<void> {
 	return new Promise((resolve, reject) => {
 		// libuv on Windows compares long event paths against this watch path; expand TEMP's 8.3 aliases.
 		const watcher = fs.watch(fs.realpathSync.native(path.dirname(file)), check);
-		const deadline = setTimeout(() => { watcher.close(); reject(new Error(`Missing barrier: ${file}`)); }, 15_000);
-		function check() {
-			if (!fs.existsSync(file)) return;
+		let settled = false;
+		const recheck = setInterval(check, 100);
+		const deadline = setTimeout(() => {
+			if (!settle()) return;
+			reject(new Error(`Missing barrier: ${file}`));
+		}, 15_000);
+		function settle(): boolean {
+			if (settled) return false;
+			settled = true;
 			clearTimeout(deadline);
+			clearInterval(recheck);
 			watcher.close();
-			resolve();
+			return true;
+		}
+		function check() {
+			if (settled || !fs.existsSync(file)) return;
+			if (settle()) resolve();
 		}
 		check();
 	});
 }
+
+describe("canonical file barrier", () => {
+	// Removing the presence recheck must strand a real marker when only notifications are lost.
+	it("finds a real marker within 100ms when watch notifications are withheld", async (t) => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "barrier-loss-"));
+		const alias = `${directory}-alias`;
+		fs.symlinkSync(directory, alias, "junction");
+		t.after(() => { fs.unlinkSync(alias); fs.rmSync(directory, { recursive: true }); });
+		t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+		const watch = fs.watch;
+		let ownedWatcher!: fs.FSWatcher;
+		t.mock.method(fs, "watch", ((watched: string, _listener: () => void) => {
+			assert.equal(watched, fs.realpathSync.native(directory));
+			// Keep the actual watcher/resource; suppress only delivery of its callback.
+			ownedWatcher = watch(watched, () => {});
+			return ownedWatcher;
+		}) as typeof fs.watch);
+		const file = path.join(alias, "ready");
+		let outcome = "pending";
+		const ready = fileBarrier(file).then(() => { outcome = "resolved"; }, () => { outcome = "rejected"; });
+		const close = t.mock.method(ownedWatcher, "close");
+		try {
+			fs.writeFileSync(file, "real marker");
+			assert.equal(fs.readFileSync(file, "utf8"), "real marker");
+			t.mock.timers.tick(99);
+			await Promise.resolve();
+			assert.equal(outcome, "pending");
+			t.mock.timers.tick(1);
+			await Promise.resolve();
+			assert.equal(outcome, "resolved", "real marker must not wait for a watch notification");
+			assert.equal(close.mock.callCount(), 1);
+		} finally {
+			t.mock.timers.tick(15_000);
+			await ready;
+			ownedWatcher.close();
+		}
+	});
+
+	// A recheck must not turn absence into success or reset/extend the original deadline.
+	it("rejects a missing marker at the unchanged 15000ms deadline", async (t) => {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "barrier-missing-"));
+		t.after(() => fs.rmSync(directory, { recursive: true }));
+		t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+		const file = path.join(directory, "missing");
+		let outcome = "pending";
+		const ready = fileBarrier(file).then(() => { outcome = "resolved"; }, (error: Error) => {
+			outcome = "rejected";
+			assert.equal(error.message, `Missing barrier: ${file}`);
+		});
+		t.mock.timers.tick(14_999);
+		await Promise.resolve();
+		assert.equal(outcome, "pending");
+		assert.equal(fs.existsSync(file), false);
+		t.mock.timers.tick(1);
+		await ready;
+		assert.equal(outcome, "rejected");
+	});
+
+	// Missing cleanup/settle-once protection would leave rechecks or close the watcher again.
+	for (const settlement of ["initial marker", "early event", "deadline"] as const) {
+		it(`cleans owned resources once after ${settlement}, including late callbacks`, async (t) => {
+			const directory = fs.mkdtempSync(path.join(os.tmpdir(), "barrier-cleanup-"));
+			t.after(() => fs.rmSync(directory, { recursive: true }));
+			t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+			const file = path.join(directory, "ready");
+			if (settlement === "initial marker") fs.writeFileSync(file, "initial");
+			const watch = fs.watch;
+			let notify!: () => void;
+			let close!: ReturnType<typeof t.mock.method<fs.FSWatcher, "close">>;
+			t.mock.method(fs, "watch", ((watched: string, listener: () => void) => {
+				notify = listener;
+				const watcher = watch(watched, () => {});
+				close = t.mock.method(watcher, "close");
+				return watcher;
+			}) as typeof fs.watch);
+			let recheck!: () => void;
+			const interval = globalThis.setInterval;
+			t.mock.method(globalThis, "setInterval", ((handler: () => void, delay: number) => {
+				assert.equal(delay, 100);
+				recheck = handler;
+				return interval(handler, delay);
+			}) as typeof setInterval);
+			const clearIntervalSpy = t.mock.method(globalThis, "clearInterval");
+			const clearDeadlineSpy = t.mock.method(globalThis, "clearTimeout");
+			const exists = t.mock.method(fs, "existsSync");
+			let outcome = "pending";
+			const ready = fileBarrier(file).then(() => { outcome = "resolved"; }, () => { outcome = "rejected"; });
+			if (settlement === "early event") {
+				notify(); // An event before file creation must not settle the barrier.
+				await Promise.resolve();
+				assert.equal(outcome, "pending");
+				fs.writeFileSync(file, "after early event");
+				notify();
+			} else if (settlement === "deadline") {
+				t.mock.timers.tick(15_000);
+			}
+			await ready;
+			assert.equal(outcome, settlement === "deadline" ? "rejected" : "resolved");
+			assert.equal(close.mock.callCount(), 1);
+			assert.equal(clearIntervalSpy.mock.callCount(), 1);
+			assert.equal(clearDeadlineSpy.mock.callCount(), 1);
+			const checksAtSettlement = exists.mock.callCount();
+			fs.writeFileSync(file, "late marker");
+			notify();
+			recheck(); // A callback already queued before cancellation is harmless too.
+			t.mock.timers.tick(30_000);
+			await Promise.resolve();
+			assert.equal(exists.mock.callCount(), checksAtSettlement, "no filesystem work after settlement");
+			assert.equal(close.mock.callCount(), 1);
+			assert.equal(clearIntervalSpy.mock.callCount(), 1);
+			assert.equal(clearDeadlineSpy.mock.callCount(), 1);
+		});
+	}
+});
 
 function publicationState(sessionId: string, owner: string): SubagentState {
 	return {
