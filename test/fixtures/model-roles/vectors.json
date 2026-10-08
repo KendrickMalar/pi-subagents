@@ -1,0 +1,114 @@
+{
+  "description": "Shared model role resolution vectors. Copied verbatim into the pi-subagents fork; both repos must pass every case.",
+  "version": 1,
+  "cases": [
+    {
+      "name": "explicit role with thinking",
+      "roles": { "slow": "openai-codex/gpt-6.1-sol:high" },
+      "ref": "@slow",
+      "expect": { "role": "slow", "model": "openai-codex/gpt-6.1-sol", "thinking": "high", "source": "explicit", "chain": ["slow"], "formatted": "openai-codex/gpt-6.1-sol:high" }
+    },
+    {
+      "name": "bare role name without @",
+      "roles": { "slow": "openai-codex/gpt-6.1-sol" },
+      "ref": "slow",
+      "expect": { "role": "slow", "model": "openai-codex/gpt-6.1-sol", "source": "explicit", "chain": ["slow"], "formatted": "openai-codex/gpt-6.1-sol" }
+    },
+    {
+      "name": "reference suffix overrides role thinking",
+      "roles": { "slow": "openai-codex/gpt-6.1-sol:high" },
+      "ref": "@slow:low",
+      "expect": { "role": "slow", "model": "openai-codex/gpt-6.1-sol", "thinking": "low", "source": "explicit", "chain": ["slow"], "formatted": "openai-codex/gpt-6.1-sol:low" }
+    },
+    {
+      "name": "alias to another role",
+      "roles": { "slow": "openai-codex/gpt-6.1-sol:high", "task": "@slow" },
+      "ref": "@task",
+      "expect": { "role": "task", "model": "openai-codex/gpt-6.1-sol", "thinking": "high", "source": "explicit", "chain": ["task", "slow"], "formatted": "openai-codex/gpt-6.1-sol:high" }
+    },
+    {
+      "name": "alias with its own thinking suffix",
+      "roles": { "slow": "openai-codex/gpt-6.1-sol:high", "task": "@slow:medium" },
+      "ref": "@task",
+      "expect": { "role": "task", "model": "openai-codex/gpt-6.1-sol", "thinking": "medium", "source": "explicit", "chain": ["task", "slow"], "formatted": "openai-codex/gpt-6.1-sol:medium" }
+    },
+    {
+      "name": "unassigned known role inherits default role",
+      "roles": { "default": "openai-codex/gpt-6-luna:xhigh" },
+      "ref": "@smol",
+      "expect": { "role": "smol", "model": "openai-codex/gpt-6-luna", "thinking": "xhigh", "source": "inherited-default", "chain": ["smol", "default"], "formatted": "openai-codex/gpt-6-luna:xhigh" }
+    },
+    {
+      "name": "unassigned default falls back to Pi default",
+      "roles": {},
+      "piDefault": { "provider": "openai-codex", "model": "gpt-6-luna", "thinking": "xhigh" },
+      "ref": "@default",
+      "expect": { "role": "default", "model": "openai-codex/gpt-6-luna", "thinking": "xhigh", "source": "pi-default", "chain": ["default"], "formatted": "openai-codex/gpt-6-luna:xhigh" }
+    },
+    {
+      "name": "unassigned role falls through default to Pi default",
+      "roles": {},
+      "piDefault": { "provider": "openai-codex", "model": "gpt-6-luna" },
+      "ref": "@task",
+      "expect": { "role": "task", "model": "openai-codex/gpt-6-luna", "source": "pi-default", "chain": ["task", "default"], "formatted": "openai-codex/gpt-6-luna" }
+    },
+    {
+      "name": "unassigned default without Pi default is an error",
+      "roles": {},
+      "ref": "@slow",
+      "error": "no_default"
+    },
+    {
+      "name": "unknown role is an error",
+      "roles": { "default": "openai-codex/gpt-6-luna" },
+      "ref": "@fast",
+      "error": "unknown_role"
+    },
+    {
+      "name": "alias to unknown role is an error",
+      "roles": { "task": "@fast" },
+      "ref": "@task",
+      "error": "unknown_role"
+    },
+    {
+      "name": "custom role defined in the map",
+      "roles": { "reviewer": "openai-codex/gpt-6.1-sol:xhigh" },
+      "ref": "@reviewer",
+      "expect": { "role": "reviewer", "model": "openai-codex/gpt-6.1-sol", "thinking": "xhigh", "source": "explicit", "chain": ["reviewer"], "formatted": "openai-codex/gpt-6.1-sol:xhigh" }
+    },
+    {
+      "name": "alias cycle is an error",
+      "roles": { "slow": "@task", "task": "@slow" },
+      "ref": "@slow",
+      "error": "role_cycle"
+    },
+    {
+      "name": "value without provider is invalid",
+      "roles": { "slow": "gpt-6.1-sol" },
+      "ref": "@slow",
+      "error": "invalid_value"
+    },
+    {
+      "name": "comma chains are not supported",
+      "roles": { "slow": "openai-codex/gpt-6.1-sol,anthropic/claude-opus" },
+      "ref": "@slow",
+      "error": "invalid_value"
+    },
+    {
+      "name": "non-thinking colon suffix stays part of the id",
+      "roles": { "smol": "openrouter/some-model:free" },
+      "ref": "@smol",
+      "expect": { "role": "smol", "model": "openrouter/some-model:free", "source": "explicit", "chain": ["smol"], "formatted": "openrouter/some-model:free" }
+    },
+    {
+      "name": "model id containing slashes",
+      "roles": { "slow": "openrouter/anthropic/claude-opus:high" },
+      "ref": "@slow",
+      "expect": { "role": "slow", "model": "openrouter/anthropic/claude-opus", "thinking": "high", "source": "explicit", "chain": ["slow"], "formatted": "openrouter/anthropic/claude-opus:high" }
+    }
+  ],
+  "cycles": [
+    { "name": "default order skips unassigned", "roles": { "default": "a/b", "slow": "a/c" }, "order": ["smol", "default", "slow"], "expect": ["default", "slow"] },
+    { "name": "custom order and duplicates", "roles": { "default": "a/b", "slow": "a/c", "smol": "a/d" }, "order": ["slow", "smol", "slow", "default"], "expect": ["slow", "smol", "default"] }
+  ]
+}

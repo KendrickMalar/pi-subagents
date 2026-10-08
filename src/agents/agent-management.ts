@@ -20,6 +20,7 @@ import {
 	removeBuiltinAgentOverride,
 	removeBuiltinAgentOverrideFields,
 	resolveAgentName,
+	readModelRoleContext,
 } from "./agents.ts";
 import { serializeAgent } from "./agent-serializer.ts";
 import { mergeAgentsForScope } from "./agent-selection.ts";
@@ -1069,10 +1070,17 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 		? [{ agent, name: requestedAgent }]
 		: [{ agent, name: agent.name }, ...(agent.aliases ?? []).map((name) => ({ agent, name }))]);
 	for (const { agent, name } of modelEntries) {
-		const resolvedModel = resolveSubagentModelOverride(agent.model, currentModel, availableModels, agent.modelProvider ?? preferredProvider);
+		let resolvedModel: string | undefined;
+		let roleError: string | undefined;
+		try {
+			resolvedModel = resolveSubagentModelOverride(agent.model, currentModel, availableModels, agent.modelProvider ?? preferredProvider, { modelRoles: readModelRoleContext(ctx.cwd) });
+		} catch (error) {
+			roleError = error instanceof Error ? error.message : String(error);
+		}
 		const effectiveThinking = resolveEffectiveThinking(resolvedModel, agent.thinking)
 			?? (agent.thinking === false ? "off" : undefined);
-		const source = `${formatModelSource(agent, currentModel)}${agent.disabled ? "; disabled" : ""}${isAgentAllowedByCapabilityCeiling(agent.name, capabilityCeiling) ? "" : "; restricted"}`;
+		const roleNote = typeof agent.model === "string" && agent.model.trim().startsWith("@") ? `; role ${agent.model.trim()}` : "";
+		const source = `${formatModelSource(agent, currentModel)}${roleNote}${roleError ? `; error: ${roleError}` : ""}${agent.disabled ? "; disabled" : ""}${isAgentAllowedByCapabilityCeiling(agent.name, capabilityCeiling) ? "" : "; restricted"}`;
 		if (requestedAgent) {
 			lines.push(`Agent: ${requestedAgent}`);
 			lines.push("Effective model:");
