@@ -103,6 +103,66 @@ it("reads a late-installed owner barrier for each final drain and balances the h
 	assert.deepEqual(held, [true, false, true, false]);
 });
 
+function registeredChildWait(config: ChildRuntimeConfig) {
+	const tools = new Map<string, { execute: Function }>();
+	// SAFETY: only the registered wait tool is exercised; no child session is spawned.
+	registerSubagentPromptRuntime({
+		on: () => {},
+		registerTool: (tool: { name: string; execute: Function }) => tools.set(tool.name, tool),
+		events: createEventBus(),
+	} as never, config);
+	return tools.get("bg_wait")!;
+}
+
+function activeChildWaitConfig(hasPendingSupervisorRequest?: () => boolean): ChildRuntimeConfig {
+	const sessionId = randomUUID();
+	return childConfig({
+		hasPendingSupervisorRequest,
+		runtimeState: {
+			currentSessionId: sessionId,
+			foregroundRuns: new Map([["owned", {
+				runId: "owned", mode: "single", cwd: os.tmpdir(), sessionId, updatedAt: 1,
+				children: [{ agent: "worker", index: 0, status: "detached", updatedAt: 1 }],
+			}]]),
+		} as SubagentState,
+	});
+}
+
+it("registered child bg_wait yields for an owner barrier installed after registration", async () => {
+	const config = activeChildWaitConfig();
+	const wait = registeredChildWait(config);
+	let checked = 0;
+	config.hasPendingSupervisorRequest = () => { checked++; return true; };
+	const result = await wait.execute("late-owner", { all: true, timeoutMs: 5 });
+	assert.equal(result.isError, undefined);
+	assert.equal(result.details.wait?.reason, "supervisor_request");
+	assert.equal(result.details.wait?.timedOut, false);
+	assert.equal(result.details.completions, undefined);
+	assert.ok(checked > 0, "the registered tool must consult the current owner barrier");
+});
+
+it("registered child bg_wait observes a replaced and then cleared owner barrier", async () => {
+	const config = activeChildWaitConfig(() => false);
+	const wait = registeredChildWait(config);
+	config.hasPendingSupervisorRequest = () => true;
+	const pending = await wait.execute("replaced-owner", { all: true, timeoutMs: 5 });
+	assert.equal(pending.details.wait?.reason, "supervisor_request");
+	config.hasPendingSupervisorRequest = undefined;
+	config.runtimeState!.foregroundRuns!.get("owned")!.children[0]!.status = "completed";
+	const cleared = await wait.execute("cleared-owner", { all: true });
+	assert.equal(cleared.isError, undefined);
+	assert.notEqual(cleared.details.wait?.reason, "supervisor_request");
+	assert.match(cleared.content.map((part: { text?: string }) => part.text ?? "").join(""), /No active/);
+});
+
+it("registered child bg_wait without an owner barrier preserves ordinary empty waits", async () => {
+	const wait = registeredChildWait(childConfig({ runtimeState: { currentSessionId: randomUUID() } as SubagentState }));
+	const result = await wait.execute("no-owner-barrier", { all: true });
+	assert.equal(result.isError, undefined);
+	assert.notEqual(result.details.wait?.reason, "supervisor_request");
+	assert.match(result.content.map((part: { text?: string }) => part.text ?? "").join(""), /No active/);
+});
+
 it("does not grant nested wait access for an invalid inherited route", async (t) => {
 	const route = createNestedRoute(randomUUID());
 	const runId = randomUUID();
