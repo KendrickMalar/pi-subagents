@@ -488,7 +488,11 @@ export default function registerSubagentPromptRuntime(pi: ExtensionAPI, config?:
 		resultFileCoalescer: { schedule: () => false, clear: () => {} },
 	} as unknown as SubagentState;
 	const nestedRootRunId = inheritedNestedRouteOf(config)?.rootRunId;
-	if (typeof pi.registerTool === "function") registerWaitTool(pi, waitState, config.waitTool.enabled, undefined, config.waitTool.defaultTimeoutMs, { nestedRootRunId });
+	if (typeof pi.registerTool === "function") {
+		// Fanout installs the owner barrier after prompt-runtime registration.
+		registerWaitTool(pi, waitState, config.waitTool.enabled, undefined, config.waitTool.defaultTimeoutMs,
+			{ nestedRootRunId }, () => config.hasPendingSupervisorRequest?.() ?? false);
+	}
 	const supervisorMetadata = childSupervisorMetadata(config);
 	let nativeSupervisorClientRegistered = false;
 	const registerNativeSupervisorClientOnce = (): void => {
