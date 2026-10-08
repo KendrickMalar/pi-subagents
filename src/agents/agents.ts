@@ -27,6 +27,8 @@ import { parseMemoryFrontmatter } from "./agent-memory.ts";
 import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import { validatePermissionRules, type PermissionRules } from "../runs/shared/permissions.ts";
 import { parseThinkingLevel, type ThinkingLevel } from "../shared/thinking-ceiling.ts";
+import { readRoleMap, type PiDefaultModel } from "../shared/model-roles.ts";
+import type { ModelRoleContext } from "../runs/shared/model-resolution.ts";
 import { assertJsonSchemaObject } from "../runs/shared/structured-output.ts";
 import { normalizeCapabilityCeilingAllowedAgents } from "../runs/shared/capability-ceiling.ts";
 
@@ -945,6 +947,33 @@ function readSettingsFileStrict(filePath: string): Record<string, unknown> {
 		throw new Error(`Settings file '${filePath}' must contain a JSON object.`);
 	}
 	return parsed as Record<string, unknown>;
+}
+
+function readPiDefaultModel(settings: Record<string, unknown>): PiDefaultModel {
+	const pick = (key: string) => (typeof settings[key] === "string" && settings[key].trim() ? settings[key].trim() : undefined);
+	const provider = pick("defaultProvider");
+	const model = pick("defaultModel");
+	const thinking = pick("defaultThinkingLevel");
+	return {
+		...(provider ? { provider } : {}),
+		...(model ? { model } : {}),
+		...(thinking ? { thinking } : {}),
+	};
+}
+
+/**
+ * Read the top-level `modelRoles` map shared with the pi-model-roles extension.
+ * Project roles override user roles per role name; Pi's own default model
+ * (used when the `default` role is unassigned) follows the same precedence.
+ */
+export function readModelRoleContext(cwd: string): ModelRoleContext {
+	const userSettings = readSettingsFileStrict(getUserAgentSettingsPath());
+	const projectPath = getProjectAgentSettingsPath(cwd);
+	const projectSettings = projectPath ? readSettingsFileStrict(projectPath) : {};
+	return {
+		roles: { ...readRoleMap(userSettings), ...readRoleMap(projectSettings) },
+		piDefault: { ...readPiDefaultModel(userSettings), ...readPiDefaultModel(projectSettings) },
+	};
 }
 
 function writeSettingsFile(filePath: string, settings: Record<string, unknown>): void {

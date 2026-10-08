@@ -9,7 +9,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as nodeModule from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { discoverAgents, formatUnknownAgentError, unknownAgentDiagnosticContext, type AgentConfig, type UnknownAgentDiagnosticContext } from "../../agents/agents.ts";
+import { discoverAgents, formatUnknownAgentError, readModelRoleContext, unknownAgentDiagnosticContext, type AgentConfig, type UnknownAgentDiagnosticContext } from "../../agents/agents.ts";
 import { createAtomicJsonWriter, writePrivateAtomicJson } from "../../shared/atomic-json.ts";
 import { childCacheRetentionEnv } from "../../shared/child-cache-retention.ts";
 import { buildEffectiveSystemPrompt } from "../shared/effective-system-prompt.ts";
@@ -1171,7 +1171,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			ctx.currentModel,
 			availableModels,
 			a.modelProvider ?? ctx.currentModelProvider,
-			{ scope: modelScopes, source: modelOrigin === "explicit" ? "explicit" : "inherited" },
+			{ scope: modelScopes, source: modelOrigin === "explicit" ? "explicit" : "inherited", modelRoles: readModelRoleContext(ctx.cwd) },
 		);
 		const thinkingOverride = flatIndex === undefined ? undefined : thinkingOverridesByFlatIndex?.[flatIndex];
 		let claudeCodeOverride: ClaudeCodeOverride | undefined;
@@ -2000,7 +2000,7 @@ export function executeAsyncSingle(
 				ctx.currentModel,
 				availableModels,
 				ctx.currentModelProvider,
-				{ scope: modelScopes, source: modelOrigin === "explicit" ? "explicit" : "inherited" },
+				{ scope: modelScopes, source: modelOrigin === "explicit" ? "explicit" : "inherited", modelRoles: readModelRoleContext(ctx.cwd) },
 			);
 	} catch (error) {
 		return formatAsyncStartError("single", error instanceof Error ? error.message : String(error));

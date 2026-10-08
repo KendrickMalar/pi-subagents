@@ -86,6 +86,33 @@ For a persistent role override:
 
 `subagents.defaultModel` and `subagents.defaultProvider` apply to builtin, package, user, project, and runtime-registered agents. `defaultModel` fills only agents that do not set `model` in frontmatter or in their runtime definition. `defaultProvider` is also applied to frontmatter and override models so bare ids resolve against the intended provider. Per-run model overrides and `agentOverrides.<name>.model` win over frontmatter and the global default. The same `agentOverrides` block can change `tools`, `skills`, inherited context, prompt text, or disable an agent (see [agents.md](agents.md)); matching custom-agent frontmatter is replaced for any field set by the override. Runtime-registered agents take only `model`, `defaultProvider`, `fast`, and `thinking` from `agentOverrides.<name>`; their other definition fields stay owned by the registering extension.
 
+## Model roles (`@role`)
+
+Any model field above — agent frontmatter `model`, `agentOverrides.<name>.model`, `agentOverridesByProvider`, `subagents.defaultModel`, or a per-run `model` — can name a model role instead of a model. Roles live in the top-level `modelRoles` map of the same settings files, shared with the [pi-model-roles](https://github.com/KendrickMalar/pi-model-roles) extension that cycles the main session through them:
+
+```json
+{
+  "modelRoles": {
+    "default": "openai-codex/gpt-6-luna:xhigh",
+    "slow": "openai-codex/gpt-6.1-sol:high",
+    "task": "@slow"
+  },
+  "subagents": {
+    "defaultModel": "@task",
+    "agentOverrides": { "reviewer": { "model": "@slow:xhigh" } }
+  }
+}
+```
+
+- A role value is `provider/model[:thinking]` or another `@role`. A suffix on the reference (`@slow:xhigh`) overrides the role's thinking level.
+- `default`, `smol`, `slow`, `task`, `plan`, `vision`, `commit`, `tiny`, `advisor`, and `designer` are built in; an unassigned one follows `@default`, and an unassigned `default` uses Pi's `defaultProvider`/`defaultModel`/`defaultThinkingLevel`. Any other role must be defined.
+- Project `modelRoles` entries override user entries per role. They are read from the same project settings file as the other `subagents.*` settings (the configured project root, without a trust check). The pi-model-roles extension reads only a trusted `<cwd>/.pi/settings.json`, so the two can differ in an untrusted project or a subdirectory.
+- The reference is expanded when a child launches, before model scope checks and watchdog launch rules, so they see the concrete model. The expanded `provider/model` must match an available model exactly: it is not fuzzy-matched, so an unauthenticated provider is not replaced by another provider that serves the same id. An unknown role, an alias cycle, a malformed value, or an unavailable model fails the launch; a role never falls back to another model.
+- `/subagents-models` shows the role next to the source and the expanded model.
+- External runners (`runner.type` `external-cli` or `external-job`) reject `@role` references. The Claude Code adapters pass model values through unchanged and reject `@role` as an invalid Claude Code model, so do not use roles for them.
+
+Model roles are unrelated to watchdog `roleModels`, which keys launch rules by agent name.
+
 ## Fast mode
 
 Set `fast: true` on a run, in agent frontmatter, or in `subagents.agentOverrides.<name>.fast` to request the OpenAI priority service tier for supported native OpenAI-Codex children. This can use a higher quota tier or cost more. It is off by default.

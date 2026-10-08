@@ -3,7 +3,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { discoverAgents, discoverAgentsAll, findBlockingAgentDiagnostic, formatUnknownAgentError, resolveAgentName, unknownAgentDiagnosticContext, type AgentConfig, type AgentDiscoveryDiagnostic, type AgentScope, type UnknownAgentDiagnosticContext } from "../../agents/agents.ts";
+import { isRoleReference } from "../../shared/model-roles.ts";
+import { discoverAgents, discoverAgentsAll, readModelRoleContext, findBlockingAgentDiagnostic, formatUnknownAgentError, resolveAgentName, unknownAgentDiagnosticContext, type AgentConfig, type AgentDiscoveryDiagnostic, type AgentScope, type UnknownAgentDiagnosticContext } from "../../agents/agents.ts";
 import { getArtifactsDir, getProjectArtifactPackagingWarning, getProjectSubagentsDir } from "../../shared/artifacts.ts";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { createCapacityResilientJsonWriter } from "../../shared/capacity-resilient-json.ts";
@@ -32,7 +33,7 @@ import { handleWatchdogToolAction, WATCHDOG_TOOL_ACTIONS } from "../../watchdog/
 import type { MainWatchdogRuntime } from "../../watchdog/runtime.ts";
 import { applyWatchdogLaunchRules } from "../../watchdog/rules.ts";
 import { childWatchdogProgressForModel } from "../../watchdog/child-status.ts";
-import { normalizeParentModel, resolveEffectiveSubagentModel, resolveModelOrigin, resolveModelSelection, scopedModelIdsFromContext, type ModelOrigin, type ParentModel } from "../shared/model-resolution.ts";
+import { normalizeParentModel, resolveEffectiveSubagentModel, resolveModelOrigin, resolveModelSelection, scopedModelIdsFromContext, type ModelOrigin, type ModelRoleContext, type ParentModel } from "../shared/model-resolution.ts";
 import { projectChainOutputSchemas, resolveEffectiveOutputSchema } from "../shared/child-launch-plan.ts";
 import { formatRetainedChildren, listRetainedChildren } from "../background/retained-children.ts";
 import { resolveModelScopesForAgent, type ModelScopeConfig } from "../shared/model-scope.ts";
@@ -3186,6 +3187,7 @@ function resolveStaticLaunchSummary(input: {
 	availableModels: ModelInfo[];
 	currentProvider?: string;
 	modelScope?: ModelScopeConfig;
+	modelRoles?: ModelRoleContext;
 	thinkingOverrideForTask: ThinkingOverrideForTask;
 }): StaticLaunchSummary {
 	const agentConfig = input.agents.find((agent) => agent.name === input.agent);
@@ -3199,7 +3201,7 @@ function resolveStaticLaunchSummary(input: {
 			input.parentModel,
 			input.availableModels,
 			agentConfig?.modelProvider ?? input.currentProvider,
-			modelScopes.length === 0 ? {} : { scope: modelScopes },
+			{ ...(modelScopes.length === 0 ? {} : { scope: modelScopes }), ...(input.modelRoles ? { modelRoles: input.modelRoles } : {}) },
 		);
 	const thinkingOverride = externalRunner ? undefined : input.thinkingOverrideForTask();
 	const thinking = externalRunner ? undefined : resolveEffectiveThinking(model, thinkingOverride ?? agentConfig?.thinking);
@@ -3218,6 +3220,7 @@ function collectStaticLaunchSummaries(input: {
 	availableModels: ModelInfo[];
 	currentProvider?: string;
 	modelScope?: ModelScopeConfig;
+	modelRoles?: ModelRoleContext;
 	thinkingOverrideForTask: ThinkingOverrideForTask;
 	dynamicFanoutMaxItems?: number;
 }): StaticLaunchSummary[] {
@@ -3231,6 +3234,7 @@ function collectStaticLaunchSummaries(input: {
 		availableModels: input.availableModels,
 		currentProvider: input.currentProvider,
 		modelScope: input.modelScope,
+		...(input.modelRoles ? { modelRoles: input.modelRoles } : {}),
 		thinkingOverrideForTask: input.thinkingOverrideForTask,
 	});
 	if (input.params.tasks) return input.params.tasks.map((task, index) => summary(task.agent, index, task.model));
@@ -3582,11 +3586,16 @@ async function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			agentModel: a.model,
 			parentModel,
 		});
+		const externalModel = params.model ?? (externalRunnerWithoutExplicitModel ? undefined : a.model);
+		if ((a.runner?.type === "external-cli" || a.runner?.type === "external-job") && typeof externalModel === "string" && isRoleReference(externalModel)) {
+			return buildRequestedModeError(params, `Agent '${a.name}' uses runner.type='${a.runner.type}', which does not support model role references ('${externalModel}').`);
+		}
 		const modelOverride = a.runner?.type === "external-cli" || a.runner?.type === "external-job"
-			? params.model ?? (externalRunnerWithoutExplicitModel ? undefined : a.model)
+			? externalModel
 			: resolveEffectiveSubagentModel(params.model as string | undefined, a.model, parentModel, availableModels, a.modelProvider ?? currentProvider, {
 				...(modelScopes.length === 0 ? {} : { scope: modelScopes }),
 				source: modelOrigin === "explicit" ? "explicit" : "inherited",
+				modelRoles: readModelRoleContext(effectiveCwd),
 			});
 		const modelOverrideFromParent = modelOrigin === "inherited";
 		const launchRuleError = applyWatchdogLaunchRules({ cwd: effectiveCwd, agent: a.name, model: modelOverride ?? (parentModel && `${parentModel.provider}/${parentModel.id}`), warn: (violation) => deps.watchdog?.displayRuleWarning(violation) });
@@ -4130,6 +4139,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		{
 			...(modelScopes.length === 0 ? {} : { scope: modelScopes }),
 			source: modelOrigin === "explicit" ? "explicit" : "inherited",
+			modelRoles: readModelRoleContext(effectiveCwd),
 		},
 	);
 	const modelOverrideFromParent = modelOrigin === "inherited";
@@ -7859,6 +7869,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					availableModels: ctx.modelRegistry.getAvailable().map(toModelInfo),
 					currentProvider: requestParentModel?.provider,
 					modelScope,
+					modelRoles: readModelRoleContext(effectiveCwd),
 					thinkingOverrideForTask,
 					dynamicFanoutMaxItems: deps.config.chain?.dynamicFanout?.maxItems,
 				});
