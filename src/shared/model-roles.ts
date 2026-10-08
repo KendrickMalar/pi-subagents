@@ -150,7 +150,8 @@ function resolvePiDefault(chain: string[], piDefault: PiDefaultModel | undefined
 	if (!piDefault?.provider || !piDefault.model) {
 		return fail(role, "no_default", `Model role '@${role}' is unassigned and no default model is configured`);
 	}
-	const value = piDefault.model.includes("/") ? piDefault.model : `${piDefault.provider}/${piDefault.model}`;
+	// Pi stores the provider separately; the model id itself may contain "/" (e.g. openrouter ids).
+	const value = `${piDefault.provider}/${piDefault.model}`;
 	const parsed = parseModelValue(chain, value, "pi-default");
 	if (!parsed.ok || parsed.thinking || !piDefault.thinking) return parsed;
 	if (!isThinkingLevel(piDefault.thinking)) {

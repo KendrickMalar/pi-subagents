@@ -106,10 +106,10 @@ Any model field above — agent frontmatter `model`, `agentOverrides.<name>.mode
 
 - A role value is `provider/model[:thinking]` or another `@role`. A suffix on the reference (`@slow:xhigh`) overrides the role's thinking level.
 - `default`, `smol`, `slow`, `task`, `plan`, `vision`, `commit`, `tiny`, `advisor`, and `designer` are built in; an unassigned one follows `@default`, and an unassigned `default` uses Pi's `defaultProvider`/`defaultModel`/`defaultThinkingLevel`. Any other role must be defined.
-- Project `modelRoles` entries override user entries per role.
-- The reference is expanded when a child launches, before model scope checks and watchdog launch rules, so they see the concrete model. An unknown role, an alias cycle, or a malformed value fails the launch; a role never falls back to another model.
+- Project `modelRoles` entries override user entries per role. They are read from the same project settings file as the other `subagents.*` settings (the configured project root, without a trust check). The pi-model-roles extension reads only a trusted `<cwd>/.pi/settings.json`, so the two can differ in an untrusted project or a subdirectory.
+- The reference is expanded when a child launches, before model scope checks and watchdog launch rules, so they see the concrete model. The expanded `provider/model` must match an available model exactly: it is not fuzzy-matched, so an unauthenticated provider is not replaced by another provider that serves the same id. An unknown role, an alias cycle, a malformed value, or an unavailable model fails the launch; a role never falls back to another model.
 - `/subagents-models` shows the role next to the source and the expanded model.
-- The Claude Code adapters pass model values through unchanged, so do not use `@role` for them.
+- External runners (`runner.type` `external-cli` or `external-job`) reject `@role` references. The Claude Code adapters pass model values through unchanged and reject `@role` as an invalid Claude Code model, so do not use roles for them.
 
 Model roles are unrelated to watchdog `roleModels`, which keys launch rules by agent name.
 

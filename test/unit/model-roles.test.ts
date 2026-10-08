@@ -88,11 +88,23 @@ describe("@role model references at launch", () => {
 		);
 	});
 
-	it("rejects a role whose model is not available for explicit requests", () => {
+	it("rejects a role whose model is not available, for explicit and inherited requests", () => {
 		const missing: ModelRoleContext = { roles: { slow: "openai-codex/missing:high" } };
-		assert.throws(
-			() => resolveSubagentModelOverride("@slow", parent, models, undefined, { modelRoles: missing, source: "explicit" }),
-			/Unknown subagent model 'openai-codex\/missing:high'/,
+		for (const source of ["explicit", "inherited"] as const) {
+			assert.throws(
+				() => resolveSubagentModelOverride("@slow", parent, models, undefined, { modelRoles: missing, source }),
+				/Model role '@slow' resolves to 'openai-codex\/missing:high', which is not an available model/,
+			);
+		}
+	});
+
+	it("does not fuzzy-match a role onto another provider with the same id", () => {
+		const routed = [...models, { provider: "openrouter", id: "anthropic/claude-opus-5", fullId: "openrouter/anthropic/claude-opus-5" }];
+		const roles: ModelRoleContext = { roles: { slow: "anthropic/claude-opus-5:high" } };
+		assert.throws(() => resolveSubagentModelOverride("@slow", parent, routed, undefined, { modelRoles: roles }), /not an available model/);
+		assert.equal(
+			resolveSubagentModelOverride("@slow", parent, routed, undefined, { modelRoles: { roles: { slow: "openrouter/anthropic/claude-opus-5:high" } } }),
+			"openrouter/anthropic/claude-opus-5:high",
 		);
 	});
 

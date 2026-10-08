@@ -305,6 +305,17 @@ export function expandModelRoleReference(model: string, modelRoles: ModelRoleCon
 	return formatResolvedModel(resolved);
 }
 
+/**
+ * A role names one exact model. Unlike other model strings it is not fuzzy-matched,
+ * so an unavailable provider cannot silently resolve to the same id elsewhere.
+ */
+function requireExactRoleModel(reference: string, expanded: string, availableModels: AvailableModelInfo[] | undefined): string {
+	if (!availableModels) return expanded;
+	const { baseModel } = splitThinkingSuffix(expanded);
+	if (availableModels.some((model) => model.fullId === baseModel)) return expanded;
+	throw new Error(`Model role '${reference}' resolves to '${expanded}', which is not an available model in the active Pi registry. Roles do not fall back to other models.`);
+}
+
 function defaultScopeWarn(violation: ModelScopeViolation): void {
 	console.warn(`[pi-subagents] ${violation.message}`);
 }
@@ -364,12 +375,16 @@ export function resolveSubagentModelOverride(
 	options?: ResolveSubagentModelOverrideOptions,
 ): string | undefined {
 	const trimmed = typeof requestedModel === "string" ? requestedModel.trim() : "";
+	const fromRole = isRoleReference(trimmed);
 	const explicit = trimmed && trimmed !== INHERIT_MODEL ? expandModelRoleReference(trimmed, options?.modelRoles) : undefined;
 	if (!parentModel) throwForUnresolvedEnforcedReservedScope(options?.scope, explicit === undefined || options?.source === "inherited");
 	let resolved: string | undefined;
 	let resolvedFromRegistry = explicit === undefined;
 	if (explicit === undefined) {
 		resolved = parentModel ? `${parentModel.provider}/${parentModel.id}` : undefined;
+	} else if (fromRole) {
+		resolved = requireExactRoleModel(trimmed, explicit, availableModels);
+		resolvedFromRegistry = availableModels !== undefined;
 	} else {
 		const candidate = resolveSubagentModelCandidate(explicit, availableModels, preferredProvider);
 		if (options?.source === "explicit") {

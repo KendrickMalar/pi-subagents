@@ -53,6 +53,13 @@
       "expect": { "role": "task", "model": "openai-codex/gpt-6-luna", "source": "pi-default", "chain": ["task", "default"], "formatted": "openai-codex/gpt-6-luna" }
     },
     {
+      "name": "Pi default model id containing a slash keeps the configured provider",
+      "roles": {},
+      "piDefault": { "provider": "openrouter", "model": "anthropic/claude-opus-5" },
+      "ref": "@default",
+      "expect": { "role": "default", "model": "openrouter/anthropic/claude-opus-5", "source": "pi-default", "chain": ["default"], "formatted": "openrouter/anthropic/claude-opus-5" }
+    },
+    {
       "name": "unassigned default without Pi default is an error",
       "roles": {},
       "ref": "@slow",

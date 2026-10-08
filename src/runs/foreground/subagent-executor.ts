@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isRoleReference } from "../../shared/model-roles.ts";
 import { discoverAgents, discoverAgentsAll, readModelRoleContext, findBlockingAgentDiagnostic, formatUnknownAgentError, resolveAgentName, unknownAgentDiagnosticContext, type AgentConfig, type AgentDiscoveryDiagnostic, type AgentScope, type UnknownAgentDiagnosticContext } from "../../agents/agents.ts";
 import { getArtifactsDir, getProjectArtifactPackagingWarning, getProjectSubagentsDir } from "../../shared/artifacts.ts";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
@@ -3585,8 +3586,12 @@ async function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			agentModel: a.model,
 			parentModel,
 		});
+		const externalModel = params.model ?? (externalRunnerWithoutExplicitModel ? undefined : a.model);
+		if ((a.runner?.type === "external-cli" || a.runner?.type === "external-job") && typeof externalModel === "string" && isRoleReference(externalModel)) {
+			return buildRequestedModeError(params, `Agent '${a.name}' uses runner.type='${a.runner.type}', which does not support model role references ('${externalModel}').`);
+		}
 		const modelOverride = a.runner?.type === "external-cli" || a.runner?.type === "external-job"
-			? params.model ?? (externalRunnerWithoutExplicitModel ? undefined : a.model)
+			? externalModel
 			: resolveEffectiveSubagentModel(params.model as string | undefined, a.model, parentModel, availableModels, a.modelProvider ?? currentProvider, {
 				...(modelScopes.length === 0 ? {} : { scope: modelScopes }),
 				source: modelOrigin === "explicit" ? "explicit" : "inherited",
