@@ -4,6 +4,7 @@ import { CODE_OWNED_EXTERNAL_CLI_ADAPTER_LABEL, isCodeOwnedExternalCliAdapterId,
 import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import { validatePermissionRules, type PermissionRules } from "../runs/shared/permissions.ts";
 import { validateToolBudgetConfig } from "../runs/shared/tool-budget.ts";
+import { normalizeCapabilityCeilingAllowedAgents } from "../runs/shared/capability-ceiling.ts";
 import { BUILTIN_AGENT_NAMES } from "./builtin-names.ts";
 import { applyRuntimeAgentSettings, type AgentConfig, type AgentDefaultContext, type AgentDiscoveryDiagnostic, type RuntimeAgentSettingsContext } from "./agents.ts";
 
@@ -22,6 +23,7 @@ export interface RuntimeAgentDefinition {
 	tools?: readonly string[];
 	excludeTools?: readonly string[];
 	allowNestedSubagents?: boolean;
+	allowedAgents?: readonly string[];
 	mcpDirectTools?: readonly string[];
 	model?: string;
 	thinking?: string | false;
@@ -132,6 +134,16 @@ function validateStringList(value: unknown, field: string): string[] | undefined
 	return [...new Set(value.map((entry, index) => validateString(entry, `${field}[${index}]`, MAX_FIELD_STRING_LENGTH)))];
 }
 
+function validateAllowedAgents(value: unknown): string[] | undefined {
+	const names = validateStringList(value, "Runtime agent definition allowedAgents");
+	if (names === undefined) return undefined;
+	try {
+		return normalizeCapabilityCeilingAllowedAgents(names);
+	} catch (error) {
+		throw new Error(`Runtime agent definition allowedAgents is invalid: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
 function validatePositiveInteger(value: unknown, field: string): number | undefined {
 	if (value === undefined) return undefined;
 	if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) throw new Error(`${field} must be a positive integer when provided.`);
@@ -198,7 +210,7 @@ function validateDefinition(value: unknown): RuntimeAgentDefinition {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Runtime agent definition must be an object.");
 	const definition = value as Record<string, unknown>;
 	const supported = new Set([
-		"description", "systemPrompt", "aliases", "tools", "excludeTools", "allowNestedSubagents", "mcpDirectTools", "model", "thinking",
+		"description", "systemPrompt", "aliases", "tools", "excludeTools", "allowNestedSubagents", "allowedAgents", "mcpDirectTools", "model", "thinking",
 		"systemPromptMode", "inheritProjectContext", "inheritGlobalContext", "inheritSkills", "defaultContext", "defaultAsync", "defaultTimeoutMs",
 		"defaultToolTimeoutMs", "defaultAcceptance", "acceptanceRole", "runner", "machine", "skills", "skillPath",
 		"extensions", "subagentOnlyExtensions", "mutationTools", "output", "outputMode", "defaultReads", "defaultProgress", "interactive",
@@ -220,6 +232,7 @@ function validateDefinition(value: unknown): RuntimeAgentDefinition {
 	const tools = validateStringList(definition.tools, "Runtime agent definition tools");
 	const excludeTools = validateStringList(definition.excludeTools, "Runtime agent definition excludeTools");
 	const allowNestedSubagents = validateBoolean(definition.allowNestedSubagents, "Runtime agent definition allowNestedSubagents");
+	const allowedAgents = validateAllowedAgents(definition.allowedAgents);
 	const mcpDirectTools = validateStringList(definition.mcpDirectTools, "Runtime agent definition mcpDirectTools");
 	const model = validateOptionalString(definition.model, "Runtime agent definition model");
 	if ((definition as Record<string, unknown>).fallbackModels !== undefined) throw new Error("Runtime agent definition fallbackModels was removed; configure one model instead.");
@@ -251,6 +264,7 @@ function validateDefinition(value: unknown): RuntimeAgentDefinition {
 		...(tools ? { tools } : {}),
 		...(excludeTools ? { excludeTools } : {}),
 		...(allowNestedSubagents !== undefined ? { allowNestedSubagents } : {}),
+		...(allowedAgents !== undefined ? { allowedAgents } : {}),
 		...(mcpDirectTools ? { mcpDirectTools } : {}),
 		...(model ? { model } : {}),
 		...(thinking !== undefined ? { thinking: thinking as string | false } : {}),
@@ -330,6 +344,7 @@ function toAgentConfig(name: string, definition: RuntimeAgentDefinition): AgentC
 		...(definition.tools !== undefined ? { tools: [...definition.tools] } : {}),
 		...(definition.excludeTools !== undefined ? { excludeTools: [...definition.excludeTools] } : {}),
 		...(definition.allowNestedSubagents !== undefined ? { allowNestedSubagents: definition.allowNestedSubagents } : {}),
+		...(definition.allowedAgents !== undefined ? { allowedAgents: [...definition.allowedAgents] } : {}),
 		...(definition.mcpDirectTools !== undefined ? { mcpDirectTools: [...definition.mcpDirectTools] } : {}),
 		...(definition.model !== undefined ? { model: definition.model } : {}),
 		...(definition.thinking !== undefined ? { thinking: definition.thinking } : {}),

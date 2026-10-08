@@ -145,6 +145,40 @@ describe("runtime agent registration", () => {
 		registration.dispose();
 	});
 
+	it("preserves allowedAgents on runtime agents, including an empty deny-all list", () => {
+		const narrowed = registerAgent({
+			pi,
+			name: "runtime-manager",
+			definition: {
+				description: "Runtime manager",
+				systemPrompt: "Delegate at runtime.",
+				allowNestedSubagents: true,
+				allowedAgents: ["runtime-coder", "runtime-tester"],
+			},
+		});
+		const denyAll = registerAgent({
+			pi,
+			name: "runtime-leaf",
+			definition: { description: "Runtime leaf", systemPrompt: "Do not delegate.", allowNestedSubagents: true, allowedAgents: [] },
+		});
+
+		const agents = mergeRuntimeAgents(pi, discoverAgents(tempProject, "both")).agents;
+		assert.deepEqual(agents.find((candidate) => candidate.name === "runtime-manager")?.allowedAgents, ["runtime-coder", "runtime-tester"]);
+		assert.deepEqual(agents.find((candidate) => candidate.name === "runtime-leaf")?.allowedAgents, []);
+		assert.equal(agents.find((candidate) => candidate.name === "runtime-manager")?.allowNestedSubagents, true);
+		narrowed.dispose();
+		denyAll.dispose();
+	});
+
+	it("rejects malformed allowedAgents on runtime agents", () => {
+		for (const allowedAgents of ["runtime-coder", [""], [42]]) {
+			assert.throws(
+				() => registerAgent({ pi, name: "runtime-bad-allowed", definition: { description: "Bad", systemPrompt: "Bad.", allowedAgents } as never }),
+				/allowedAgents/,
+			);
+		}
+	});
+
 	it("registers through the owner runtime when consumer and owner API objects differ", () => {
 		const events = makeEventBus();
 		const ownerPi = makePiWithEvents(events);
