@@ -206,6 +206,8 @@ If `pi-subagents` is a resolvable dependency of the consumer package, `pi-subage
 
 A registered agent follows the operator's subagent model settings like any other agent: `subagents.defaultModel`, `defaultProvider`, and `defaultThinking` fill a definition that omits `model` or `thinking`, and the `model`, `defaultProvider`, `fast`, and `thinking` fields of `agentOverrides.<name>` win over the definition. Every other definition field stays extension-owned, and other override fields are ignored for runtime agents. Set `model` in the definition only when the agent must not follow operator model settings; `model: "inherit"` selects the parent session model explicitly.
 
+A definition may set `allowedAgents` to restrict which canonical agent names the registered agent may launch, with the same meaning as the frontmatter field: an empty list denies every descendant launch, and it only narrows an existing nesting grant (`tools: ["subagent"]` or `allowNestedSubagents: true`). `advertise` is not part of the runtime definition; runtime agents are never listed in the parent agent catalog.
+
 The installed owner applies the existing runtime-agent validation, collision checks, limits, runtime source metadata, and cleanup. If more than one owner listens, the first handler that writes `request.result` wins. Unsupported versions, malformed requests, and registration failures return `{ ok: false, error }`. No result means no compatible owner handled the event.
 
 This contract is process-local. It does not register agents in child sessions or other Pi processes, and it does not change package discovery or package resolution.
