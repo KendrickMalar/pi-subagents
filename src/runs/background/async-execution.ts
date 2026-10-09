@@ -284,6 +284,8 @@ interface AsyncSingleParams {
 	sessionRoot?: string;
 	sessionDir?: string;
 	sessionFile?: string;
+	/** Run whose session directory holds a reused sessionFile. */
+	sessionOwnerRunId?: string;
 	revivalLease?: SessionLeaseRequest;
 	context?: ContextMode;
 	skills?: string[];
@@ -2134,6 +2136,7 @@ export function executeAsyncSingle(
 		agent,
 		launchResolvedExtensions,
 		...(sessionFile ? { sessionFile } : {}),
+		...(sessionFile && params.sessionOwnerRunId ? { sessionOwnerRunId: params.sessionOwnerRunId } : {}),
 		cwd: runnerCwd,
 		...(selectedModel ? { model: selectedModel } : {}),
 		...(params.fast ?? recoveryAgentConfig.fast ? { fast: params.fast ?? recoveryAgentConfig.fast } : {}),

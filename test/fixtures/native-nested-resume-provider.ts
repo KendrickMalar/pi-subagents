@@ -34,42 +34,38 @@ export default function (pi: ExtensionAPI) {
 							output.content = [{ type: "text", text: textOf(managed).includes("COORDINATOR_CONSUMED_RESUMED_WORKER") ? "PARENT_SAW_RESUMED_WORKER" : `PARENT_UNEXPECTED: ${textOf(managed).slice(0, 300)}` }];
 						}
 					} else if (model.id === "worker") {
-						const users = context.messages.filter(message => message.role === "user");
-						const resumed = users.some(message => textOf(message).includes("RESUME_PROMPT"));
-						output.content = [{ type: "text", text: resumed ? "WORKER_RESUMED_WITH_MEMORY" : "WORKER_FIRST_REPORT" }];
+						const resumes = context.messages.filter(message => message.role === "user" && textOf(message).includes("RESUME_PROMPT")).length;
+						output.content = [{ type: "text", text: ["WORKER_FIRST_REPORT", "WORKER_RESUMED_WITH_MEMORY", "WORKER_RESUMED_TWICE"][Math.min(resumes, 2)]! }];
 					} else {
 						const failed = results.find(message => message.isError);
 						if (failed) throw new Error(`Coordinator tool failed: ${textOf(failed)}`);
-						const launch = results.find(message => message.toolName === "subagent");
+						const wanted = Number(process.env.PI_SUBAGENTS_NESTED_RESUME_TIMES ?? "1");
+						const subagents = results.filter(message => message.toolName === "subagent");
+						const [launch, ...resumes] = subagents;
 						const waits = results.filter(message => message.toolName === "bg_wait");
-						const resume = results.filter(message => message.toolName === "subagent")[1];
-						const read = results.find(message => message.toolName === "read");
+						const reads = results.filter(message => message.toolName === "read");
 						const uuid = (text: string) => text.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/)?.[0];
+						const revivedId = (text: string) => text.match(/^Revived run: ([0-9a-f-]{36})$/m)?.[1];
+						const launchId = launch ? uuid(textOf(launch)) : undefined;
+						const latestId = resumes.length === 0 ? launchId : revivedId(textOf(resumes[resumes.length - 1]!));
 						if (!launch) {
 							output.content = [call("subagent", { agent: "worker", task: "Report your first finding.", async: true })];
-						} else if (waits.length === 0) {
-							const runId = uuid(textOf(launch));
-							if (!runId) throw new Error(`Launch receipt lacks a run id: ${textOf(launch)}`);
-							append({ event: "launched", runId, text: textOf(launch) });
-							output.content = [call("bg_wait", { id: runId, timeoutMs: 15000 })];
-						} else if (!resume) {
-							const runId = uuid(textOf(launch))!;
-							append({ event: "first-wait", text: textOf(waits[0]!) });
-							output.content = [call("subagent", { action: "resume", id: runId, message: "RESUME_PROMPT: report again from the same session." })];
-						} else if (waits.length === 1) {
-							const resumedId = textOf(resume).match(/^Revived run: ([0-9a-f-]{36})$/m)?.[1];
-							append({ event: "resumed", resumedId, text: textOf(resume) });
-							append({ event: "resume-receipt", text: textOf(resume) });
-							if (!resumedId) throw new Error(`Resume receipt lacks a run id: ${textOf(resume)}`);
-							output.content = [call("bg_wait", { id: resumedId, timeoutMs: 15000 })];
-						} else if (!read) {
+						} else if (!latestId) {
+							throw new Error(`Receipt lacks a run id: ${textOf(subagents[subagents.length - 1]!)}`);
+						} else if (waits.length === resumes.length) {
+							append({ event: resumes.length === 0 ? "launched" : "resumed", runId: latestId, resumedId: latestId, text: textOf(subagents[subagents.length - 1]!) });
+							output.content = [call("bg_wait", { id: latestId, timeoutMs: 15000 })];
+						} else if (resumes.length > 0 && reads.length < resumes.length) {
 							const reference = textOf(waits[waits.length - 1]!).match(/^Result \[[^\]]+\]: (.+)$/m)?.[1];
 							if (!reference) throw new Error(`Resumed wait lacks a result reference: ${textOf(waits[waits.length - 1]!)}`);
 							output.content = [call("read", { path: reference })];
+						} else if (resumes.length < wanted) {
+							output.content = [call("subagent", { action: "resume", id: latestId, message: `RESUME_PROMPT ${resumes.length + 1}: report again from the same session.` })];
 						} else {
-							const consumed = textOf(read).includes("WORKER_RESUMED_WITH_MEMORY");
+							const expected = wanted >= 2 ? "WORKER_RESUMED_TWICE" : "WORKER_RESUMED_WITH_MEMORY";
+							const consumed = textOf(reads[reads.length - 1]!).includes(expected);
 							append({ event: "consumed", consumed });
-							output.content = [{ type: "text", text: consumed ? "COORDINATOR_CONSUMED_RESUMED_WORKER" : `UNEXPECTED: ${textOf(read).slice(0, 200)}` }];
+							output.content = [{ type: "text", text: consumed ? "COORDINATOR_CONSUMED_RESUMED_WORKER" : `UNEXPECTED: ${textOf(reads[reads.length - 1]!).slice(0, 200)}` }];
 						}
 					}
 					output.stopReason = output.content.some(part => part.type === "toolCall") ? "toolUse" : "stop";

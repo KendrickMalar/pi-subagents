@@ -836,6 +836,8 @@ export interface SteeringRecoveryDescriptor {
 	agentContract?: AgentContract;
 	agent: string;
 	sessionFile?: string;
+	/** Run whose session directory holds sessionFile; a revival continues its source's file. */
+	sessionOwnerRunId?: string;
 	/** Git ref used to allocate managed worktrees for this run. */
 	baseRef?: string;
 	/** Launcher name the run was wrapped with; resume re-reads its argv from current user config. Absence means unwrapped. */

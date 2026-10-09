@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import registerFanoutChildSubagentExtension from "../../src/extension/fanout-child.ts";
-import { createSubagentExecutor, readNestedRecoveryDescriptor } from "../../src/runs/foreground/subagent-executor.ts";
+import { createSubagentExecutor, readNestedRecoveryDescriptor, validateNestedSessionFile } from "../../src/runs/foreground/subagent-executor.ts";
 import { createNestedRoute, findNestedControlResult, nestedResultsPath, projectNestedEvents, readNestedControlRequests, readNestedControlResults, snapshotNestedEventFiles, writeNestedControlRequest, writeNestedControlResult, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import type { ChildRuntimeConfig } from "../../src/runs/shared/child-runtime-config.ts";
 import { ASYNC_DIR, RESULTS_DIR, TEMP_ROOT_DIR, type SubagentState } from "../../src/shared/types.ts";
@@ -474,6 +474,27 @@ describe("nested control routing", () => {
 
 			assert.equal(result.isError, true);
 			assert.match(text(result), /outside trusted nested session roots/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("accepts a revived run's session only under the owner its launch descriptor names", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-revival-owner-"));
+		try {
+			const ownerFile = path.join(root, "sessions", "owner-run", "run-0", "session.jsonl");
+			const siblingFile = path.join(root, "sessions", "sibling-run", "run-0", "session.jsonl");
+			for (const file of [ownerFile, siblingFile]) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, ""); }
+			const trusted = [path.join(root, "sessions")];
+			const revived = { id: "revived-run", sessionFile: ownerFile } as Parameters<typeof validateNestedSessionFile>[0];
+			const descriptor = (sessionFile: string, sessionOwnerRunId?: string) => ({ sessionFile, ...(sessionOwnerRunId ? { sessionOwnerRunId } : {}) }) as Parameters<typeof validateNestedSessionFile>[2];
+
+			assert.equal(validateNestedSessionFile(revived, trusted, descriptor(ownerFile, "owner-run")), fs.realpathSync(ownerFile));
+			assert.throws(() => validateNestedSessionFile(revived, trusted), /not under that nested run's session directory/);
+			assert.throws(() => validateNestedSessionFile(revived, trusted, descriptor(ownerFile)), /not under that nested run's session directory/);
+			// The descriptor's owner applies only to the session file it recorded.
+			assert.throws(() => validateNestedSessionFile({ ...revived, sessionFile: siblingFile }, trusted, descriptor(ownerFile, "owner-run")), /not under that nested run's session directory/);
+			assert.throws(() => validateNestedSessionFile(revived, trusted, descriptor(ownerFile, "sibling-run")), /not under that nested run's session directory/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

@@ -1516,7 +1516,7 @@ function pathWithin(base: string, candidate: string): boolean {
 	return resolvedCandidate === resolvedBase || resolvedCandidate.startsWith(`${resolvedBase}${path.sep}`);
 }
 
-function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: string[]): string {
+export function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: string[], recoveryDescriptor?: SteeringRecoveryDescriptor): string {
 	const sessionFile = nestedRunSessionFile(run);
 	if (!sessionFile) throw new Error(`Nested run '${run.id}' does not have a persisted session file to resume from.`);
 	if (path.extname(sessionFile) !== ".jsonl") throw new Error(`Nested run '${run.id}' session file must be a .jsonl file: ${sessionFile}`);
@@ -1532,7 +1532,13 @@ function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: s
 	if (!trustedRoots.some((root) => pathWithin(root, realSessionFile))) {
 		throw new Error(`Nested run '${run.id}' session file is outside trusted nested session roots: ${sessionFile}`);
 	}
-	if (!realSessionFile.split(path.sep).includes(run.id)) {
+	// A revival continues its source's session file; its own launch descriptor names the run that owns that file.
+	const owner = recoveryDescriptor?.sessionOwnerRunId !== undefined
+		&& recoveryDescriptor.sessionFile !== undefined
+		&& path.resolve(recoveryDescriptor.sessionFile) === resolved
+		? recoveryDescriptor.sessionOwnerRunId
+		: run.id;
+	if (!realSessionFile.split(path.sep).includes(owner)) {
 		throw new Error(`Nested run '${run.id}' session file is not under that nested run's session directory: ${sessionFile}`);
 	}
 	return realSessionFile;
@@ -1563,7 +1569,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 		agent,
 		index: 0,
 		cwd: asyncDir ? path.dirname(asyncDir) : undefined,
-		sessionFile: validateNestedSessionFile(run, trustedSessionRoots),
+		sessionFile: validateNestedSessionFile(run, trustedSessionRoots, recoveryDescriptor),
 		...(run.capabilityCeiling ? { capabilityCeiling: run.capabilityCeiling } : {}),
 		...(recoveryDescriptor ? { recoveryDescriptor } : {}),
 	});
@@ -2275,6 +2281,8 @@ async function resumeAsyncRun(input: {
 		sessionRoot: input.deps.getSubagentSessionRoot(parentSessionFile ?? revivalSessionFile),
 		...(recoveryDescriptor?.sessionDir ? { sessionDir: recoveryDescriptor.sessionDir } : {}),
 		sessionFile: revivalSessionFile,
+		// A revival appends to its source's session, which stays under the original owner's directory.
+		sessionOwnerRunId: recoveryDescriptor?.sessionOwnerRunId ?? target.runId,
 		revivalLease: {
 			sessionFile: revivalSessionFile,
 			runId,
