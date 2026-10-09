@@ -495,6 +495,9 @@ describe("nested control routing", () => {
 			// The descriptor's owner applies only to the session file it recorded.
 			assert.throws(() => validateNestedSessionFile({ ...revived, sessionFile: siblingFile }, trusted, descriptor(ownerFile, "owner-run")), /not under that nested run's session directory/);
 			assert.throws(() => validateNestedSessionFile(revived, trusted, descriptor(ownerFile, "sibling-run")), /not under that nested run's session directory/);
+			// Directory names at or above the trusted root never identify an owner.
+			assert.throws(() => validateNestedSessionFile(revived, trusted, descriptor(ownerFile, "sessions")), /not under that nested run's session directory/);
+			assert.throws(() => validateNestedSessionFile(revived, trusted, descriptor(ownerFile, path.basename(root))), /not under that nested run's session directory/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

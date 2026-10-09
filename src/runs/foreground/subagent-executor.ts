@@ -1538,7 +1538,10 @@ export function validateNestedSessionFile(run: NestedRunSummary, trustedSessionR
 		&& path.resolve(recoveryDescriptor.sessionFile) === resolved
 		? recoveryDescriptor.sessionOwnerRunId
 		: run.id;
-	if (!realSessionFile.split(path.sep).includes(owner)) {
+	// Only directories below a trusted root can name the owner; ancestors such as the root itself never count.
+	const ownedBelowTrustedRoot = trustedRoots.some((root) => pathWithin(root, realSessionFile)
+		&& path.relative(root, realSessionFile).split(path.sep).slice(0, -1).includes(owner));
+	if (!ownedBelowTrustedRoot) {
 		throw new Error(`Nested run '${run.id}' session file is not under that nested run's session directory: ${sessionFile}`);
 	}
 	return realSessionFile;
@@ -2282,7 +2285,11 @@ async function resumeAsyncRun(input: {
 		...(recoveryDescriptor?.sessionDir ? { sessionDir: recoveryDescriptor.sessionDir } : {}),
 		sessionFile: revivalSessionFile,
 		// A revival appends to its source's session, which stays under the original owner's directory.
-		sessionOwnerRunId: recoveryDescriptor?.sessionOwnerRunId ?? target.runId,
+		sessionOwnerRunId: recoveryDescriptor?.sessionOwnerRunId !== undefined
+			&& recoveryDescriptor.sessionFile !== undefined
+			&& path.resolve(recoveryDescriptor.sessionFile) === path.resolve(revivalSessionFile)
+			? recoveryDescriptor.sessionOwnerRunId
+			: target.runId,
 		revivalLease: {
 			sessionFile: revivalSessionFile,
 			runId,
