@@ -548,6 +548,64 @@ if (!fs.existsSync(${JSON.stringify(holdPath)})) { console.log('{}'); } else {
 		}
 	});
 
+	it("keys an async single child's session directory by its async run id", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "session path probe done" });
+		const ctx = makeMinimalCtx(tempDir);
+		const state: SubagentState = {
+			baseCwd: tempDir,
+			currentSessionId: ctx.sessionManager.getSessionId(),
+			asyncJobs: new Map(),
+			foregroundControls: new Map(),
+			lastForegroundControlId: null,
+		};
+		const piEvents = createEventBus();
+		const sessionRoot = path.join(tempDir, ".pi/subagents", "sessions");
+		const executor = createSubagentExecutor!({
+			pi: { events: piEvents, getSessionName: () => undefined },
+			state,
+			config: {},
+			asyncByDefault: false,
+			tempArtifactsDir: tempDir,
+			getSubagentSessionRoot: () => sessionRoot,
+			expandTilde: (value: string) => value,
+			discoverAgents: () => ({ agents: [makeAgent("echo")] }),
+			allowMutatingManagementActions: true,
+		});
+		let asyncDir: string | undefined;
+		let resultPath: string | undefined;
+		try {
+			const result = await executor.execute(
+				"async-session-path",
+				{ agent: "echo", task: "Probe the session path", async: true },
+				new AbortController().signal,
+				undefined,
+				ctx,
+			);
+			asyncDir = result.details.asyncDir;
+			assert.equal(result.isError, undefined, result.content[0]?.text ?? "async launch failed");
+			const asyncId = result.details.asyncId!;
+			resultPath = path.join(DIRS.results, `${asyncId}.json`);
+			const waited = await waitForSubagents({ id: asyncId, timeoutMs: 30_000 }, undefined, { state, events: piEvents });
+			assert.equal(waited.isError, undefined, JSON.stringify(waited));
+			const status = JSON.parse(fs.readFileSync(path.join(asyncDir!, "status.json"), "utf-8")) as AsyncStatus;
+			const sessionFile = status.sessionFile ?? status.steps?.[0]?.sessionFile;
+			assert.ok(sessionFile, "async status must record the child session file");
+			// Nested resume trusts a session file only under the directory named by the run id it resumes.
+			assert.equal(path.relative(path.join(sessionRoot, asyncId), sessionFile).startsWith(".."), false, `${sessionFile} is not under ${asyncId}`);
+		} finally {
+			if (asyncDir) {
+				const eventsPath = path.join(asyncDir, "events.jsonl");
+				const deadline = Date.now() + 10_000;
+				while (!fs.existsSync(eventsPath) || !fs.readFileSync(eventsPath, "utf-8").includes("subagent.run.process_terminal")) {
+					assert.ok(Date.now() <= deadline, `Timed out waiting for process terminal: ${eventsPath}`);
+					await new Promise((resolve) => setTimeout(resolve, 50));
+				}
+				fs.rmSync(asyncDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+			}
+			if (resultPath) fs.rmSync(resultPath, { force: true });
+		}
+	});
+
 	it("keeps delegated agent and config tool budgets at a minimum of one", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		const ctx = makeMinimalCtx(tempDir);
 		const cases = [

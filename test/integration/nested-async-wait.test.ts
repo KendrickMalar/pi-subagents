@@ -140,3 +140,57 @@ it("native child coordinator yields its explicit wait, replies, and consumes the
 		// The shared test loader owns temp cleanup; the audit and close proof survive in TAP output.
 	}
 });
+
+it("native child coordinator resumes its terminal async worker from the persisted session", {
+	skip: !process.env.PI_SUBAGENTS_NATIVE_PI_ROOT && "Requires PI_SUBAGENTS_NATIVE_PI_ROOT and native-peer-loader.mjs",
+	timeout: 60000,
+}, async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-native-nested-resume-"));
+	const agentDir = path.join(root, "agent");
+	const auditPath = path.join(root, "audit.jsonl");
+	const savedEnv = { ...process.env };
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	process.env.PI_OFFLINE = "1";
+	process.env.PI_SUBAGENTS_NESTED_RESUME_AUDIT = auditPath;
+	const extension = fileURLToPath(new URL("../fixtures/native-nested-resume-provider.ts", import.meta.url));
+	fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
+	fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false } }));
+	for (const [name, tools] of [["worker", "read"], ["coordinator", "read, subagent, bg_wait"]] as const) {
+		fs.writeFileSync(path.join(agentDir, "agents", `${name}.md`), [
+			"---", `name: ${name}`, "description: Native nested resume test", `model: nested-resume-fixture/${name}`,
+			`tools: ${tools}`, `extensions: ${extension}`,
+			"inheritGlobalContext: false", "inheritProjectContext: false", "inheritSkills: false", "acceptanceRole: read-only", "---",
+			"Complete only the fixture task.",
+		].join("\n"));
+	}
+	const factory = createDefaultChildSessionFactory();
+	setChildSessionFactory(factory);
+	try {
+		// The parent launches the coordinator, so the coordinator's async worker is a nested run.
+		const parent = makeAgent("parent", {
+			model: "nested-resume-fixture/parent", tools: ["read", "subagent"],
+			extensions: [extension], inheritGlobalContext: false, inheritProjectContext: false, inheritSkills: false,
+		});
+		const result = await runSync(root, [parent], "parent", "Delegate to the coordinator.", {
+			runId: "native-nested-resume", sessionDir: path.join(root, "sessions"), share: false, maxSubagentDepth: 4,
+			timeoutMs: 45000, waitToolDefaultTimeoutMs: 15000, childSessionFactory: factory,
+		});
+		const auditText = fs.existsSync(auditPath) ? fs.readFileSync(auditPath, "utf8") : "missing";
+		assert.equal(result.exitCode, 0, `${result.error}\nAudit: ${auditText}`);
+		assert.equal(result.finalOutput, "PARENT_SAW_RESUMED_WORKER", auditText);
+		const audit = auditText.trim().split("\n").map(line => JSON.parse(line));
+		const launched = audit.find(entry => entry.event === "launched");
+		const resumed = audit.find(entry => entry.event === "resumed");
+		assert.ok(launched?.runId && resumed?.resumedId, auditText);
+		assert.match(resumed.text, /^Session: .*\.jsonl$/m, "nested resume must name the persisted session it revives");
+		assert.ok(audit.some(entry => entry.event === "model-output" && entry.model === "worker" && entry.content.some((part: { text?: string }) => part.text === "WORKER_FIRST_REPORT")));
+		assert.ok(audit.some(entry => entry.event === "model-output" && entry.model === "worker" && entry.content.some((part: { text?: string }) => part.text === "WORKER_RESUMED_WITH_MEMORY")), "the resumed worker must see its prior session and the follow-up");
+	} finally {
+		await factory.dispose();
+		setChildSessionFactory(undefined);
+		for (const key of ["PI_CODING_AGENT_DIR", "PI_OFFLINE", "PI_SUBAGENTS_NESTED_RESUME_AUDIT"]) {
+			if (savedEnv[key] === undefined) delete process.env[key]; else process.env[key] = savedEnv[key];
+		}
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
