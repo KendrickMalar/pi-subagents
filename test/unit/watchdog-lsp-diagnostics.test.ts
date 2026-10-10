@@ -110,7 +110,8 @@ describe("watchdog LSP diagnostics", () => {
 				cwd: temp,
 				root: temp,
 				changedPaths: ["src/file.ts"],
-				config: { enabled: true, timeoutMs: 500, maxFiles: 10, maxDiagnostics: 10 },
+				// The malformed reply fails at once; the long deadline only covers a slow server start under load.
+				config: { enabled: true, timeoutMs: 10000, maxFiles: 10, maxDiagnostics: 10 },
 			});
 
 			assert.equal(diagnostics.status, "failed");

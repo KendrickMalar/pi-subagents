@@ -82,13 +82,17 @@ describe("resolveGlobalNpmRoot", () => {
 
 	it("terminates the owned npm process on timeout", async () => {
 		if (process.platform === "win32") return; // Windows npm.cmd needs a shell.
-		const { dir, env } = fixture("exit 1");
+		// A shell records its pid within milliseconds and exec keeps that pid for the long-running npm.
+		const { dir, env } = fixture(`echo $$ > "$(dirname "$0")/../npm.pid"\nexec sleep 60`);
 		const pidFile = path.join(dir, "npm.pid");
-		const executable = path.join(dir, "bin", "npm");
-		fs.writeFileSync(executable, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);\n`, { mode: 0o755 });
-		assert.equal(await resolveGlobalNpmRoot({ env, timeoutMs: 500 }), null);
+		assert.equal(await resolveGlobalNpmRoot({ env, timeoutMs: 1500 }), null);
 		const pid = Number(fs.readFileSync(pidFile, "utf8"));
-		await new Promise<void>((resolve) => setTimeout(resolve, 30));
+		// The lookup resolves at its deadline without waiting for the killed process to be reaped.
+		const deadline = Date.now() + 5000;
+		while (Date.now() < deadline) {
+			try { process.kill(pid, 0); } catch { break; }
+			await new Promise<void>((resolve) => setTimeout(resolve, 20));
+		}
 		assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "timed-out npm must exit");
 	});
 
