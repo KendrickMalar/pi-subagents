@@ -209,6 +209,35 @@ describe("createForkContextResolver", () => {
 		}
 	});
 
+	it("places forks in the directory supplied once the launch knows it", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-dir-"));
+		try {
+			const sessionDir = path.join(tempDir, "sessions");
+			const parent = SessionManager.create(tempDir, sessionDir);
+			parent.appendMessage({ role: "user", content: "parent prompt" });
+			parent.appendMessage({ role: "assistant", content: "parent response" });
+			const parentSessionFile = parent.getSessionFile();
+			const leafId = parent.getLeafId();
+			assert.ok(parentSessionFile);
+			assert.ok(leafId);
+
+			let forkDir: string | undefined;
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => leafId,
+			}, "fork", { sessionDir: () => forkDir });
+			// The directory is read when the fork is created, not when the resolver is built.
+			forkDir = path.join(tempDir, "sessions", "launch-root", "run-id", "forks");
+
+			const childSessionFile = resolver.sessionFileForIndex(0);
+			assert.ok(childSessionFile);
+			assert.equal(path.dirname(childSessionFile), forkDir);
+			assert.equal(JSON.parse(fs.readFileSync(childSessionFile, "utf-8").split("\n")[0]).parentSession, parentSessionFile);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("fails clearly for an unpersisted parent with a current leaf", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-unpersisted-"));
 		try {

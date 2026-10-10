@@ -49,7 +49,7 @@ export default function (pi: ExtensionAPI) {
 						const launchId = launch ? uuid(textOf(launch)) : undefined;
 						const latestId = resumes.length === 0 ? launchId : revivedId(textOf(resumes[resumes.length - 1]!));
 						if (!launch) {
-							output.content = [call("subagent", { agent: "worker", task: "Report your first finding.", async: true })];
+							output.content = [call("subagent", { agent: "worker", task: "Report your first finding.", async: true, ...(process.env.PI_SUBAGENTS_NESTED_RESUME_CONTEXT === "fork" ? { context: "fork" } : {}) })];
 						} else if (!latestId) {
 							throw new Error(`Receipt lacks a run id: ${textOf(subagents[subagents.length - 1]!)}`);
 						} else if (waits.length === resumes.length) {

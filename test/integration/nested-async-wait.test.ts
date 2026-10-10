@@ -141,7 +141,7 @@ it("native child coordinator yields its explicit wait, replies, and consumes the
 	}
 });
 
-for (const times of [1, 2]) it(`native child coordinator resumes its terminal async worker ${times === 1 ? "once" : "again after a revival"} from the persisted session`, {
+for (const [times, context] of [[1, "fresh"], [2, "fresh"], [2, "fork"]] as const) it(`native child coordinator resumes its terminal ${context === "fork" ? "forked " : ""}async worker ${times === 1 ? "once" : "again after a revival"} from the persisted session`, {
 	skip: !process.env.PI_SUBAGENTS_NATIVE_PI_ROOT && "Requires PI_SUBAGENTS_NATIVE_PI_ROOT and native-peer-loader.mjs",
 	timeout: 60000,
 }, async () => {
@@ -153,6 +153,7 @@ for (const times of [1, 2]) it(`native child coordinator resumes its terminal as
 	process.env.PI_OFFLINE = "1";
 	process.env.PI_SUBAGENTS_NESTED_RESUME_AUDIT = auditPath;
 	process.env.PI_SUBAGENTS_NESTED_RESUME_TIMES = String(times);
+	process.env.PI_SUBAGENTS_NESTED_RESUME_CONTEXT = context;
 	const extension = fileURLToPath(new URL("../fixtures/native-nested-resume-provider.ts", import.meta.url));
 	fs.mkdirSync(path.join(agentDir, "agents"), { recursive: true });
 	fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false } }));
@@ -184,6 +185,8 @@ for (const times of [1, 2]) it(`native child coordinator resumes its terminal as
 		const resumed = audit.find(entry => entry.event === "resumed");
 		assert.ok(launched?.runId && resumed?.resumedId, auditText);
 		assert.match(resumed.text, /^Session: .*\.jsonl$/m, "nested resume must name the persisted session it revives");
+		// A forked worker's session sits under its own run's directory, so the coordinator can resume it.
+		if (context === "fork") assert.match(resumed.text, new RegExp(`^Session: .*/${launched.runId}/forks/[^/]+\\.jsonl$`, "m"), resumed.text);
 		assert.ok(audit.some(entry => entry.event === "model-output" && entry.model === "worker" && entry.content.some((part: { text?: string }) => part.text === "WORKER_FIRST_REPORT")));
 		assert.ok(audit.some(entry => entry.event === "model-output" && entry.model === "worker" && entry.content.some((part: { text?: string }) => part.text === "WORKER_RESUMED_WITH_MEMORY")), "the resumed worker must see its prior session and the follow-up");
 		if (times === 2) {
@@ -193,7 +196,7 @@ for (const times of [1, 2]) it(`native child coordinator resumes its terminal as
 	} finally {
 		await factory.dispose();
 		setChildSessionFactory(undefined);
-		for (const key of ["PI_CODING_AGENT_DIR", "PI_OFFLINE", "PI_SUBAGENTS_NESTED_RESUME_AUDIT", "PI_SUBAGENTS_NESTED_RESUME_TIMES"]) {
+		for (const key of ["PI_CODING_AGENT_DIR", "PI_OFFLINE", "PI_SUBAGENTS_NESTED_RESUME_AUDIT", "PI_SUBAGENTS_NESTED_RESUME_TIMES", "PI_SUBAGENTS_NESTED_RESUME_CONTEXT"]) {
 			if (savedEnv[key] === undefined) delete process.env[key]; else process.env[key] = savedEnv[key];
 		}
 		fs.rmSync(root, { recursive: true, force: true });

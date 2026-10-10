@@ -7506,6 +7506,8 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		if (spawnPreflight.error) return spawnBudgetErrorResult(spawnPreflight.error, foregroundMode);
 
 		let forkSessionFileForIndex: (idx?: number) => string | undefined = () => undefined;
+		// Fork files live under this launch's session root, which is only known once the run id is.
+		let forkSessionDir: string | undefined;
 		let prepareForkSessionForIndex: (idx?: number) => Promise<void> = async () => {};
 		// Check before pruner/session preparation, then recheck immediately before each fork
 		// because the session capability ceiling can tighten while preparation awaits.
@@ -7537,7 +7539,13 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			const forkContextResolver = createForkContextResolver(
 				ctx.sessionManager,
 				contextPolicy.usesFork ? "fork" : undefined,
-				pruneSession ? { pruneSession } : {},
+				{
+					...(pruneSession ? { pruneSession } : {}),
+					sessionDir: () => {
+						if (!forkSessionDir) throw new Error("Fork session directory is not known before the launch's session root exists.");
+						return forkSessionDir;
+					},
+				},
 			);
 			prepareForkSessionForIndex = forkContextResolver.prepareSessionForIndex;
 			forkSessionFileForIndex = forkContextResolver.sessionFileForIndex;
@@ -7663,6 +7671,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				contextPolicy.contextSummary,
 			);
 		}
+		forkSessionDir = path.join(sessionRoot, "forks");
 		const sessionDirForIndex = (idx?: number) =>
 			path.join(sessionRoot, `run-${idx ?? 0}`);
 		const forkSessionFileForTask: ForkSessionFileForTask = (agentName, idx = 0) => {
