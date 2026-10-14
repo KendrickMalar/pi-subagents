@@ -212,6 +212,10 @@ The installed owner applies the existing runtime-agent validation, collision che
 
 This contract is process-local. It does not register agents in child sessions or other Pi processes, and it does not change package discovery or package resolution.
 
+Native fanout launches explicitly carry a fixed snapshot of the launching owner's registered local native definitions. The selected agent's canonical `allowedAgents` and inherited capability ceiling narrow this snapshot; an empty allowlist carries no definitions. Native children register the snapshot through the same definition validation and configured/runtime collision checks. Their management list, model resolution, and execution discovery use the receiving owner's registry. Registration alone never widens tool, extension, model, permission, or nesting gates.
+
+Snapshots are bounded to 200 definitions and 1 MiB of UTF-8 JSON, detached from later owner changes, validated again at child launch and recovery, and disposed with the receiving child. External CLI/job and remote definitions are not inherited. Background recovery retains the original snapshot (including an explicit empty value), rather than looking up newly registered definitions. Foreground history validates the retained snapshot against its independent 1 MiB bound while keeping the existing 64 KiB bound for all other resume-contract fields; valid snapshots are not silently dropped from saved history. The registration event itself remains process-local: this is native launch transport, not a new cross-process registration API or a model-supplied definition parameter.
+
 ## External jobs in FleetView
 
 Use `pi-subagents/external-runs` to publish display-only current-session jobs owned by another extension:

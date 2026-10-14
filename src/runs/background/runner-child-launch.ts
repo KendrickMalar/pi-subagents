@@ -55,6 +55,7 @@ export function buildRunnerChildLaunch(step: RunnerSubagentStep, ctx: RunnerChil
 		extensions: step.extensions,
 		subagentOnlyExtensions: step.subagentOnlyExtensions,
 		requiredExtensions: step.requiredExtensions,
+		runtimeAgentSnapshot: step.runtimeAgentSnapshot,
 		fast: step.fast,
 		systemPrompt: acceptancePrompt ? `${step.systemPrompt ?? ""}\n${acceptancePrompt}` : step.systemPrompt ?? "",
 		systemPromptMode: step.systemPromptMode,

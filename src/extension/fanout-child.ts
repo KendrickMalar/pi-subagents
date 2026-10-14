@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { discoverAgents } from "../agents/agents.ts";
+import {discoverAgentsForRuntime, filterRuntimeAgentSnapshot, registerRuntimeAgentSnapshot} from "../agents/runtime-agent-snapshot.ts";
 import { getArtifactsDir } from "../shared/artifacts.ts";
 import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { resolveWaitToolConfig } from "../runs/background/wait-config.ts";
@@ -158,7 +158,9 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI, c
 		: new WeakSet<ExtensionAPI>();
 	globalStore[registeredKey] = registeredApis;
 	if (registeredApis.has(pi)) return;
+	const inheritedAgents = childConfig.runtimeAgentSnapshot ? registerRuntimeAgentSnapshot(pi, filterRuntimeAgentSnapshot(childConfig.runtimeAgentSnapshot, childConfig.capabilityCeiling)) : undefined;
 	registeredApis.add(pi);
+	try {
 
 	const config = loadConfig();
 	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
@@ -206,7 +208,7 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI, c
 		tempArtifactsDir: getArtifactsDir(null),
 		getSubagentSessionRoot,
 		expandTilde,
-		discoverAgents,
+		discoverAgents: (cwd, scope, provider) => discoverAgentsForRuntime(pi, cwd, scope, provider),
 		allowMutatingManagementActions: false,
 		childRuntime: childConfig,
 		activateSupervisorTransport: supervisorChannel.activateTransport,
@@ -258,6 +260,8 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI, c
 		supervisorChannel.activateTransport();
 	});
 	pi.on("session_shutdown", () => {
+		inheritedAgents?.dispose();
+		registeredApis.delete(pi);
 		unsubscribeAsyncStarted?.();
 		unsubscribeBridgeStarted?.();
 		bridgeSweeper.dispose();
@@ -279,4 +283,9 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI, c
 	previous?.cleanup();
 	const inboxState = previous?.state ?? createNestedControlInboxState();
 	listenerCleanups.set(routeKey, { state: inboxState, cleanup: startNestedControlInboxListener(pi, state, route, inboxState) });
+	} catch (error) {
+		inheritedAgents?.dispose();
+		registeredApis.delete(pi);
+		throw error;
+	}
 }

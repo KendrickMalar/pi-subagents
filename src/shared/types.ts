@@ -831,6 +831,7 @@ export interface SteeringRecoveryDescriptor {
 	launchContractDigest?: string;
 	extensionBindings?: ExtensionBindings;
 	requiredExtensions?: RequiredChildExtensionSnapshot;
+	runtimeAgentSnapshot?: import("../agents/runtime-agent-snapshot.ts").RuntimeAgentSnapshot;
 	runFanoutBudget: RunFanoutBudgetDescriptor;
 	sourceRunId: string;
 	agentContract?: AgentContract;
@@ -2173,6 +2174,7 @@ export interface ForegroundResumeChild {
 	/** Private bounded launch fields needed to preserve the child contract on resume. */
 	resumeContract?: {
 		modelResponseAliases?: Record<string, string[]>;
+		runtimeAgentSnapshot?: import("../agents/runtime-agent-snapshot.ts").RuntimeAgentSnapshot;
 		outputSchema?: JsonSchemaObject | false;
 		agentContract?: AgentContract;
 		acceptance?: AcceptanceInput;
@@ -2481,6 +2483,9 @@ export interface RunSyncOptions {
 	projectTrusted?: boolean;
 	/** The launching executor's own child runtime when it is itself an in-process child. */
 	childRuntime?: import("../runs/shared/child-runtime-config.ts").ChildRuntimeConfig;
+	/** The invoking owner is in-process only; never serialized to a runner. */
+	runtimeAgentOwner?: import("@earendil-works/pi-coding-agent").ExtensionAPI;
+	runtimeAgentSnapshot?: import("../agents/runtime-agent-snapshot.ts").RuntimeAgentSnapshot;
 	/** Fires once the child session exists and can be steered. */
 	onChildSession?: (controls: ForegroundChildSessionControls) => void;
 	/** Opt-in global permission rules; missing tools remain allowed. */

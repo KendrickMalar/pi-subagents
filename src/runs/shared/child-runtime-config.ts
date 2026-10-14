@@ -81,6 +81,8 @@ export interface ChildRuntimeConfig {
 	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 	/** Immutable root-parent host policy propagated to nested native launches. */
 	requiredExtensions?: RequiredChildExtensionSnapshot;
+	/** Fixed, parent-owned native definitions; the receiving ceiling still applies. */
+	runtimeAgentSnapshot?: import("../../agents/runtime-agent-snapshot.ts").RuntimeAgentSnapshot;
 	thinkingCeiling?: ThinkingLevel;
 	inheritProjectContext?: boolean;
 	inheritGlobalContext?: boolean;

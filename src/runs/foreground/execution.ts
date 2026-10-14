@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import { discoverAgents, formatUnknownAgentError, unknownAgentDiagnosticContext, type AgentConfig } from "../../agents/agents.ts";
+import {prepareRuntimeAgentSnapshot} from "../../agents/runtime-agent-snapshot.ts";
 import { alignForkedSessionCwd } from "../../shared/fork-session-cwd.ts";
 import { buildEffectiveSystemPrompt } from "../shared/effective-system-prompt.ts";
 import {
@@ -378,12 +379,14 @@ async function runSingleAttempt(
 		? path.join(options.artifactsDir, "permission-audit", `${options.runId}-${options.index ?? 0}.jsonl`)
 		: undefined;
 	let onWatchdogStatus: ((event: ChildWatchdogStatusEvent) => void) | undefined;
+	const runtimeAgentSnapshot = prepareRuntimeAgentSnapshot(options.runtimeAgentOwner, agent, intersectSubagentCapabilityCeilings(options.capabilityCeiling, options.childRuntime?.capabilityCeiling), options.runtimeAgentSnapshot);
 	const launch = buildInProcessChildLaunch({
 		machine: options.machine,
 		remoteSkillNames: options.skills ?? agent.skills,
 		remoteReads: options.remoteReads,
 		extensionBindings: options.extensionBindings,
 		requiredExtensions: options.requiredExtensions,
+		runtimeAgentSnapshot,
 		sessionEnabled: shared.sessionEnabled,
 		sessionDir: options.sessionDir,
 		sessionFile: options.sessionFile,

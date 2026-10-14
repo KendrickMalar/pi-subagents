@@ -5,6 +5,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isRoleReference } from "../../shared/model-roles.ts";
 import { discoverAgents, discoverAgentsAll, readModelRoleContext, findBlockingAgentDiagnostic, formatUnknownAgentError, resolveAgentName, unknownAgentDiagnosticContext, type AgentConfig, type AgentDiscoveryDiagnostic, type AgentScope, type UnknownAgentDiagnosticContext } from "../../agents/agents.ts";
+import {prepareRuntimeAgentSnapshot, type RuntimeAgentSnapshot} from "../../agents/runtime-agent-snapshot.ts";
 import { getArtifactsDir, getProjectArtifactPackagingWarning, getProjectSubagentsDir } from "../../shared/artifacts.ts";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { createCapacityResilientJsonWriter } from "../../shared/capacity-resilient-json.ts";
@@ -783,7 +784,7 @@ function foregroundChildActivityFromProgress(progress: SingleResult["progress"] 
 	};
 }
 
-function rememberForegroundRun(state: SubagentState, input: { modelResponseAliases?: Record<string, string[]>; runId: string; mode: "single" | "parallel" | "chain"; cwd: string; sessionId: string | null; results: SingleResult[]; params: SubagentParamsLike; effectiveOutput?: string | boolean; effectiveOutputMode: OutputMode; extensionBindings?: ExtensionBindings; requiredExtensions?: SteeringRecoveryDescriptor["requiredExtensions"] }): void {
+function rememberForegroundRun(state: SubagentState, input: { runtimeAgentSnapshot?: RuntimeAgentSnapshot; modelResponseAliases?: Record<string, string[]>; runId: string; mode: "single" | "parallel" | "chain"; cwd: string; sessionId: string | null; results: SingleResult[]; params: SubagentParamsLike; effectiveOutput?: string | boolean; effectiveOutputMode: OutputMode; extensionBindings?: ExtensionBindings; requiredExtensions?: SteeringRecoveryDescriptor["requiredExtensions"] }): void {
 	state.foregroundRuns ??= new Map();
 	const previous = state.foregroundRuns.get(input.runId);
 	const updatedAt = Date.now();
@@ -796,6 +797,7 @@ function rememberForegroundRun(state: SubagentState, input: { modelResponseAlias
 		children: input.results.map((result, index) => {
 			const resumeContract = omitUndefinedProperties({
 				modelResponseAliases: input.modelResponseAliases,
+				runtimeAgentSnapshot: input.runtimeAgentSnapshot,
 				outputSchema: input.params.outputSchema,
 				agentContract: input.params.agentContract,
 				acceptance: input.params.acceptance,
@@ -2259,6 +2261,8 @@ async function resumeAsyncRun(input: {
 		goal: effectiveFollowUp,
 		agentConfig,
 		recoveryAgentConfig,
+		// A retained contract cannot silently acquire runtime definitions registered later.
+		runtimeAgentSnapshot: recoveryDescriptor ? recoveryDescriptor.runtimeAgentSnapshot ?? {version: 1, agents: []} : foregroundContract ? foregroundContract.runtimeAgentSnapshot ?? {version: 1, agents: []} : undefined,
 		ctx: compactOptional<Parameters<typeof executeAsyncSingle>[1]["ctx"]>({
 			pi: input.deps.pi,
 			cwd: input.requestCwd,
@@ -4325,11 +4329,15 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 
 	const deadlineAt = data.deadlineAt ?? (data.timeoutMs !== undefined ? Date.now() + data.timeoutMs : undefined);
 	let r: Awaited<ReturnType<typeof runSync>> | undefined;
+	let foregroundRuntimeAgents: RuntimeAgentSnapshot | undefined;
 	let resolveDetachedWorkflowChild: ((result: Awaited<ReturnType<typeof runSync>>) => void) | undefined;
 	const detachedWorkflowChild = params.workflowAwaitDetached === true
 		? new Promise<Awaited<ReturnType<typeof runSync>>>((resolve) => { resolveDetachedWorkflowChild = resolve; })
 		: undefined;
 	try {
+		const selectedAgent = resolveAgentName(params.agent!, agents).agent;
+		const runtimeAgentSnapshot = selectedAgent ? prepareRuntimeAgentSnapshot(deps.pi, selectedAgent, data.capabilityCeiling) : undefined;
+		foregroundRuntimeAgents = runtimeAgentSnapshot;
 		const launched = await runSync(ctx.cwd, agents, params.agent!, task, compactOptional<Parameters<typeof runSync>[4]>({
 			machine: foregroundMachine,
 			parentProviderRegistry: ctx.modelRegistry,
@@ -4337,6 +4345,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 			remoteReads: foregroundMachine ? readsOverride : undefined,
 			permissions: deps.config.permissions,
 			runtimeSnapshotHost: deps.pi,
+			runtimeAgentSnapshot,
+			runtimeAgentOwner: deps.pi,
 			parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
 			requiredExtensions,
 			childRuntime: deps.childRuntime,
@@ -4499,7 +4509,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		usageBudget: usageBudgetState(data.usageBudget, totalCost),
 		...(worktreeHandoff?.reference ? { parallelHandoff: worktreeHandoff.reference } : {}),
 	}));
-	rememberForegroundRun(deps.state, { modelResponseAliases, runId, mode: "single", cwd: singleCwd, sessionId: data.parentSessionId, results: details.results, params, effectiveOutput, effectiveOutputMode, extensionBindings: params.extensionBindings, requiredExtensions });
+	rememberForegroundRun(deps.state, { runtimeAgentSnapshot: foregroundRuntimeAgents, modelResponseAliases, runId, mode: "single", cwd: singleCwd, sessionId: data.parentSessionId, results: details.results, params, effectiveOutput, effectiveOutputMode, extensionBindings: params.extensionBindings, requiredExtensions });
 
 	const suppressRoutineResultIntercom = shouldSuppressRoutineResultIntercom({ suppressRoutineResultIntercom: params.suppressRoutineResultIntercom, results: [r] });
 	if (!r.detached && !r.interrupted && !suppressRoutineResultIntercom) {

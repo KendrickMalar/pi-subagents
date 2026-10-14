@@ -36,6 +36,7 @@ import { createCapturedChildHooks, withChildSessionErrorReporting } from "./chil
 import type { ChildTranscriptWriter } from "../../shared/child-transcript.ts";
 import type { ChildSessionLaunch, ChildSessionStorage } from "./child-session.ts";
 import { resolveRequiredChildExtensions, type RequiredChildExtensionSnapshot } from "../../shared/required-child-extensions.ts";
+import {filterRuntimeAgentSnapshot, validateRuntimeAgentSnapshot, type RuntimeAgentSnapshot} from "../../agents/runtime-agent-snapshot.ts";
 
 /** Environment variable pi-mcp-adapter reads for the tools a child may expose. */
 export const MCP_DIRECT_TOOLS_ENV = "MCP_DIRECT_TOOLS";
@@ -45,7 +46,7 @@ export const MCP_DIRECT_TOOLS_ENV = "MCP_DIRECT_TOOLS";
  * launches inherits. Serialized into the background runner config; the
  * foreground path passes the executor's full `ChildRuntimeConfig`.
  */
-export type InheritedChildRuntime = Pick<ChildRuntimeConfig, "depth" | "maxDepth" | "nestedRoute" | "nestedParent" | "capabilityCeiling" | "thinkingCeiling" | "runFanoutBudget" | "requiredExtensions">;
+export type InheritedChildRuntime = Pick<ChildRuntimeConfig, "depth" | "maxDepth" | "nestedRoute" | "nestedParent" | "capabilityCeiling" | "thinkingCeiling" | "runFanoutBudget" | "requiredExtensions" | "runtimeAgentSnapshot">;
 
 export function inheritedChildRuntime(config: ChildRuntimeConfig | undefined): InheritedChildRuntime | undefined {
 	if (!config) return undefined;
@@ -58,6 +59,7 @@ export function inheritedChildRuntime(config: ChildRuntimeConfig | undefined): I
 		...(config.thinkingCeiling ? { thinkingCeiling: config.thinkingCeiling } : {}),
 		...(config.runFanoutBudget ? { runFanoutBudget: config.runFanoutBudget } : {}),
 		...(config.requiredExtensions ? { requiredExtensions: config.requiredExtensions } : {}),
+		...(config.runtimeAgentSnapshot ? {runtimeAgentSnapshot: validateRuntimeAgentSnapshot(config.runtimeAgentSnapshot)} : {}),
 	};
 }
 
@@ -83,6 +85,7 @@ export interface BuildInProcessChildLaunchInput {
 	subagentOnlyExtensions?: string[];
 	/** Serialized launch snapshot; omitted only for a top-level parent-process lookup. */
 	requiredExtensions?: RequiredChildExtensionSnapshot;
+	runtimeAgentSnapshot?: RuntimeAgentSnapshot;
 	systemPrompt?: string | null;
 	mcpDirectTools?: string[];
 	/** Selections the parent resolved against Pi's built-in MCP, carried to the runner. */
@@ -247,6 +250,8 @@ export function buildInProcessChildLaunch(input: BuildInProcessChildLaunchInput)
 		fs.mkdirSync(path.join(supervisorDir, "requests"), { recursive: true });
 		fs.mkdirSync(path.join(supervisorDir, "replies"), { recursive: true });
 	}
+	const suppliedRuntimeAgents = input.runtimeAgentSnapshot ?? input.inherited?.runtimeAgentSnapshot;
+	const runtimeAgentSnapshot = suppliedRuntimeAgents === undefined ? undefined : filterRuntimeAgentSnapshot(suppliedRuntimeAgents, toolPlan.capabilityCeiling);
 	const thinkingCeiling = intersectThinkingCeilings(input.thinkingCeiling, inherited?.thinkingCeiling);
 
 	let structuredValue: unknown;
@@ -274,6 +279,7 @@ export function buildInProcessChildLaunch(input: BuildInProcessChildLaunchInput)
 		...(toolPlan.capabilityCeiling ? { capabilityCeiling: toolPlan.capabilityCeiling } : {}),
 		...(thinkingCeiling ? { thinkingCeiling } : {}),
 		...(toolPlan.requiredExtensions.length > 0 ? { requiredExtensions: toolPlan.requiredExtensions } : {}),
+		...(fanout && !input.machine && runtimeAgentSnapshot ? {runtimeAgentSnapshot} : {}),
 		inheritProjectContext: input.inheritProjectContext,
 		inheritGlobalContext: input.inheritGlobalContext,
 		inheritSkills: input.inheritSkills,

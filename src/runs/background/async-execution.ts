@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import * as nodeModule from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, formatUnknownAgentError, readModelRoleContext, unknownAgentDiagnosticContext, type AgentConfig, type UnknownAgentDiagnosticContext } from "../../agents/agents.ts";
+import {prepareRuntimeAgentSnapshot, type RuntimeAgentSnapshot} from "../../agents/runtime-agent-snapshot.ts";
 import { createAtomicJsonWriter, writePrivateAtomicJson } from "../../shared/atomic-json.ts";
 import { childCacheRetentionEnv } from "../../shared/child-cache-retention.ts";
 import { buildEffectiveSystemPrompt } from "../shared/effective-system-prompt.ts";
@@ -271,6 +272,8 @@ interface AsyncSingleParams {
 	/** Agent contract before per-run bridge injection, used only for recovery persistence. */
 	recoveryAgentConfig?: AgentConfig;
 	requiredExtensions?: RequiredChildExtensionSnapshot;
+	/** A revival retains even an empty snapshot rather than reading the current owner. */
+	runtimeAgentSnapshot?: RuntimeAgentSnapshot;
 	ctx: AsyncExecutionContext;
 	cwd?: string;
 	requestedCwd?: string;
@@ -1250,6 +1253,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			runtimeSnapshotHost: ctx.pi,
 		});
 		const launchResolvedExtensions = externalRunner ? undefined : projectLaunchResolvedChildExtensions(toolPlan);
+		const runtimeAgentSnapshot = externalRunner || machine ? undefined : prepareRuntimeAgentSnapshot(ctx.pi, a, toolPlan.capabilityCeiling);
 		if (externalRunner && permissionRules) {
 			throw new AsyncStartValidationError(`Agent '${a.name}' uses runner.type='${externalRunnerType}', which cannot enforce native Pi child permission rules.`);
 		}
@@ -1289,6 +1293,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			extensions: a.extensions,
 			subagentOnlyExtensions: a.subagentOnlyExtensions,
 			...(!externalRunner ? { requiredExtensions } : {}),
+			...(runtimeAgentSnapshot ? {runtimeAgentSnapshot} : {}),
 			mcpDirectTools: a.mcpDirectTools,
 			...(toolPlan.builtinMcpTools ? { builtinMcpTools: toolPlan.builtinMcpTools } : {}),
 			mutationTools: a.mutationTools,
@@ -2097,6 +2102,7 @@ export function executeAsyncSingle(
 		runtimeSnapshotHost: ctx.pi,
 	});
 	const launchResolvedExtensions = externalRunner ? undefined : projectLaunchResolvedChildExtensions(toolPlan);
+	const runtimeAgentSnapshot = externalRunner || machine ? undefined : prepareRuntimeAgentSnapshot(ctx.pi, agentConfig, toolPlan.capabilityCeiling, params.runtimeAgentSnapshot);
 	const fast = params.fast ?? agentConfig.fast;
 	const launchThinking = resolveEffectiveThinking(selectedModel, effectiveThinking);
 	const { definitionDigest, launchContractDigest } = resolveLaunchBinding({
@@ -2130,6 +2136,7 @@ export function executeAsyncSingle(
 		launchContractDigest,
 		...(extensionBindings ? { extensionBindings } : {}),
 		...(requiredExtensions.length > 0 ? { requiredExtensions } : {}),
+		...(runtimeAgentSnapshot ? {runtimeAgentSnapshot} : {}),
 		runFanoutBudget,
 		sourceRunId: id,
 		...(params.agentContract ? { agentContract: params.agentContract } : {}),
@@ -2229,6 +2236,7 @@ export function executeAsyncSingle(
 						extensions: agentConfig.extensions,
 						subagentOnlyExtensions: agentConfig.subagentOnlyExtensions,
 						...(!externalRunner ? { requiredExtensions } : {}),
+						...(runtimeAgentSnapshot ? {runtimeAgentSnapshot} : {}),
 						mcpDirectTools: agentConfig.mcpDirectTools,
 						...(toolPlan.builtinMcpTools ? { builtinMcpTools: toolPlan.builtinMcpTools } : {}),
 						mutationTools: agentConfig.mutationTools,

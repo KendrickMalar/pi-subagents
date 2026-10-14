@@ -23,6 +23,7 @@ import { clearAgentDiscoveryCache, discoverAgentSnapshot, discoverAgents, discov
 import { resolveGlobalNpmRoot } from "../agents/global-npm-root.ts";
 import { buildAdvertisedAgentCatalog, buildAdvertisedAgentPrompt } from "../agents/advertised-agent-prompt.ts";
 import { clearRuntimeAgentsForPi, listRuntimeAgentConfigs, mergeRuntimeAgents } from "../agents/runtime-agent-registry.ts";
+import {discoverAgentsForRuntime as discoverRuntimeAgents} from "../agents/runtime-agent-snapshot.ts";
 import { registerRuntimeAgentEventListener } from "../agents/runtime-agent-events.ts";
 import { ensureAccessibleDir } from "../shared/accessible-dir.ts";
 import { cleanupAllArtifactDirs, cleanupOldArtifacts, getArtifactsDir } from "../shared/artifacts.ts";
@@ -480,24 +481,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		if (scheduledRunManager.observedCompletionRunIds().size > 0) return true;
 		return missionObserverResultCandidateFiles(DIRS.results).length > 0;
 	};
-	const discoverAgentsForRuntime = (cwd: string, scope: AgentScope, preferredModelProvider?: string) => {
-		if (listRuntimeAgentConfigs(pi).length === 0) return discoverAgents(cwd, scope, preferredModelProvider, { globalNpmRoot: globalRoot });
-		const snapshot = discoverAgentSnapshot(cwd, scope, preferredModelProvider, { includeChains: false, globalNpmRoot: globalRoot });
-		const discovered = snapshot.effective;
-		const all = snapshot.all;
-		const configuredAgents: AgentConfig[] = [
-			...all.builtin,
-			...all.package,
-			...all.user,
-			...all.project,
-		];
-		const merged = mergeRuntimeAgents(pi, discovered, configuredAgents, { cwd, scope, preferredModelProvider });
-		if (discovered.maxThinking === undefined) return merged;
-		return {
-			...merged,
-			agents: merged.agents.map((agent) => agent.maxThinking === discovered.maxThinking ? agent : { ...agent, maxThinking: discovered.maxThinking }),
-		};
-	};
+	const discoverAgentsForRuntime = (cwd: string, scope: AgentScope, preferredModelProvider?: string) =>
+		discoverRuntimeAgents(pi, cwd, scope, preferredModelProvider, {globalNpmRoot: globalRoot});
 	const programStatus = registerProgramStatusReporter({
 		enabled: config.programStatus !== false,
 		// Fleet history keeps recent finished runs after the widget drops them.
