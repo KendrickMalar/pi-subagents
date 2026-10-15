@@ -74,6 +74,8 @@ export interface ChildRuntimeConfig {
 	/** Route the child reports nested runs on; set only for fanout-authorized children. */
 	nestedRoute?: ChildNestedRoute;
 	nestedParent?: ChildNestedParent;
+	/** Verified former manager subtree, granted only by the original parent's recover operation. Not inherited by grandchildren. */
+	recoveredNestedParentRunId?: string;
 	runFanoutBudget?: RunFanoutBudgetDescriptor;
 	/** Nesting depth of this child (1 for a top-level parent's child). */
 	depth: number;

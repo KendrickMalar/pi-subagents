@@ -627,7 +627,7 @@ export function retainNestedLookupRoute(
 
 export interface NestedRunResolutionScope {
 	routes: NestedRoute[];
-	descendantOf?: { parentRunId: string; parentStepIndex?: number };
+	descendantOf?: { parentRunId: string; parentStepIndex?: number; previousParentRunId?: string };
 }
 
 function collectNestedRuns(children: NestedRunSummary[] | undefined, output: NestedRunSummary[] = []): NestedRunSummary[] {
@@ -642,7 +642,7 @@ function collectNestedRuns(children: NestedRunSummary[] | undefined, output: Nes
 function collectScopedNestedRuns(children: NestedRunSummary[] | undefined, scope: NestedRunResolutionScope["descendantOf"], output: NestedRunSummary[] = []): NestedRunSummary[] {
 	if (!scope) return collectNestedRuns(children, output);
 	for (const child of children ?? []) {
-		if (child.parentRunId === scope.parentRunId && (scope.parentStepIndex === undefined || child.parentStepIndex === scope.parentStepIndex)) {
+		if ((child.parentRunId === scope.parentRunId || child.parentRunId === scope.previousParentRunId) && (scope.parentStepIndex === undefined || child.parentStepIndex === scope.parentStepIndex)) {
 			collectNestedRuns([child], output);
 			continue;
 		}

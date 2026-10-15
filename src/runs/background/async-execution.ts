@@ -320,6 +320,8 @@ interface AsyncSingleParams {
 	controlIntercomTarget?: string;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	nestedRoute?: NestedRouteInfo;
+	/** Host-verified recovery admission; not a model-facing launch option. */
+	recoveredNestedParentRunId?: string;
 	acceptance?: AcceptanceInput;
 	timeoutMs?: number;
 	absoluteDeadlineAt?: number;
@@ -2310,6 +2312,7 @@ export function executeAsyncSingle(
 				...(lane ? { lane } : {}),
 				...(params.revivalLease ? { revivalLease: params.revivalLease } : {}),
 				nestedRoute: nestedRoute ?? inheritedNestedRoute,
+				recoveredNestedParentRunId: params.recoveredNestedParentRunId,
 				...(launcher ? { launcher } : {}),
 				nestedSelf: inheritedNestedRoute && nestedAddress ? {
 					parentRunId: nestedAddress.parentRunId,

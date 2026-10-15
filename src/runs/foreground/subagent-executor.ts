@@ -224,8 +224,9 @@ import {
 	type SteeringTargetState,
 } from "../../shared/types.ts";
 import { deriveChildSessionName } from "../../shared/child-session-name.ts";
+import { recoverNestedRunTree, recoveredNestedBinding, type NestedRecoveryResult } from "../background/nested-recovery.ts";
 
-const MUTATING_MANAGEMENT_ACTIONS = new Set(["command.yield", "command.cancel", "create", "update", "delete", "eject", "disable", "enable", "reset", "grant-spawn-budget", "watchdog.configure", "mission.create", "mission.update", "mission.resolve-decision", "mission.attach-run", "mission.close", "inspector.open", "inspector.close", "project.open", "project.close", "worktree.discard", "worktree.cleanup", "lane.recordMerge", "lane.recordSupersession", "refine", "refine.rollback", "dismiss", "schedule.create", "schedule.pause", "schedule.resume", "schedule.run", "schedule.run-due", "schedule.delete"]);
+const MUTATING_MANAGEMENT_ACTIONS = new Set(["recover", "command.yield", "command.cancel", "create", "update", "delete", "eject", "disable", "enable", "reset", "grant-spawn-budget", "watchdog.configure", "mission.create", "mission.update", "mission.resolve-decision", "mission.attach-run", "mission.close", "inspector.open", "inspector.close", "project.open", "project.close", "worktree.discard", "worktree.cleanup", "lane.recordMerge", "lane.recordSupersession", "refine", "refine.rollback", "dismiss", "schedule.create", "schedule.pause", "schedule.resume", "schedule.run", "schedule.run-due", "schedule.delete"]);
 const DESTRUCTIVE_MANAGEMENT_ACTIONS = new Set(["command.cancel", "delete", "eject", "disable", "reset", "mission.close", "worktree.discard", "refine.rollback", "inspector.close", "project.close", "stop", "interrupt", "schedule.delete"]);
 
 function resolveSteerDeliveryMode(mode: SubagentParamsLike["mode"]): SteerDeliveryMode | undefined {
@@ -326,6 +327,7 @@ interface TaskParam {
 export interface SubagentParamsLike {
 	action?: string;
 	id?: string;
+	nestedRootRunId?: string;
 	runId?: string;
 	dir?: string;
 	handoffPath?: string;
@@ -639,10 +641,15 @@ function nestedResolutionScopeForExecutor(deps: ExecutorDeps): NestedRunResoluti
 	if (deps.allowMutatingManagementActions !== false) return undefined;
 	const route = inheritedNestedRoute(deps);
 	const address = route ? inheritedNestedParentAddress(deps) : undefined;
-	return {
-		routes: route ? [route] : [],
-		...(address ? { descendantOf: { parentRunId: address.parentRunId, ...(address.parentStepIndex !== undefined ? { parentStepIndex: address.parentStepIndex } : {}) } } : {}),
-	};
+	const scope: NestedRunResolutionScope = { routes: route ? [route] : [] };
+	if (address) {
+		scope.descendantOf = { parentRunId: address.parentRunId };
+		if (address.parentStepIndex !== undefined) scope.descendantOf.parentStepIndex = address.parentStepIndex;
+		if (deps.childRuntime?.recoveredNestedParentRunId) {
+			scope.descendantOf.previousParentRunId = deps.childRuntime.recoveredNestedParentRunId;
+		}
+	}
+	return scope;
 }
 
 function trustedSessionRootsForStatus(ctx: ExtensionContext, deps: ExecutorDeps): string[] {
@@ -2198,6 +2205,12 @@ async function resumeAsyncRun(input: {
 	if (!revivalSessionFile) {
 		return { content: [{ type: "text", text: `Async run '${target.runId}' child ${target.index} does not have a persisted session file to resume from.` }], isError: true, details: { mode: "management", results: [] } };
 	}
+	let recoveredOwnership: ReturnType<typeof recoveredNestedBinding>;
+	try {
+		recoveredOwnership = recoveredNestedBinding(input.deps.state, revivalSessionFile, target.agent);
+	} catch (error) {
+		return { content: [{ type: "text", text: error instanceof Error ? error.message : "Recovered ownership validation failed." }], isError: true, details: { mode: "management", results: [] } };
+	}
 	if (target.source === "async" && asyncReviveRequiresRecoveryDescriptor(target)) {
 		return { content: [{ type: "text", text: `Async child '${target.runId}' is missing its required run fan-out recovery identity. Start a new run instead.` }], isError: true, details: { mode: "management", results: [] } };
 	}
@@ -2261,6 +2274,8 @@ async function resumeAsyncRun(input: {
 		goal: effectiveFollowUp,
 		agentConfig,
 		recoveryAgentConfig,
+		nestedRoute: recoveredOwnership?.route,
+		recoveredNestedParentRunId: recoveredOwnership?.ownerRunId,
 		// A retained contract cannot silently acquire runtime definitions registered later.
 		runtimeAgentSnapshot: recoveryDescriptor ? recoveryDescriptor.runtimeAgentSnapshot ?? {version: 1, agents: []} : foregroundContract ? foregroundContract.runtimeAgentSnapshot ?? {version: 1, agents: []} : undefined,
 		ctx: compactOptional<Parameters<typeof executeAsyncSingle>[1]["ctx"]>({
@@ -6731,6 +6746,27 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			requestParentModel = normalizeParentModel(ctx.model);
 		}
 		if (action) {
+			if (action === "recover") {
+				const ownerRunId = paramsWithResolvedCwd.id ?? "";
+				const rootRunId = paramsWithResolvedCwd.nestedRootRunId ?? "";
+				const refused = (code: string, message: string): NestedRecoveryResult => ({ status: "blocked", ownerRunId, rootRunId, code, message, descendants: [] });
+				let recovery: NestedRecoveryResult;
+				if (deps.allowMutatingManagementActions === false) {
+					recovery = refused("CHILD_SAFE", "recover is not available from child-safe fanout mode.");
+				} else if (Object.entries(directParams).some(([key, value]) => value !== undefined && !["action", "id", "nestedRootRunId", "cwd"].includes(key))) {
+					recovery = refused("INVALID_TARGET", "recover requires exact id and nestedRootRunId without launch or directory parameters.");
+				} else {
+					const parentSessionFile = ctx.sessionManager.getSessionFile();
+					recovery = parentSessionFile
+						? recoverNestedRunTree({ ownerRunId, nestedRootRunId: rootRunId }, { state: deps.state, parentSessionFile })
+						: refused("PARENT_MISMATCH", "An original persisted parent session is required.");
+				}
+				return {
+					content: [{ type: "text", text: recovery.status === "recovered" ? recovery.message : `Nested recovery refused: ${recovery.message}` }],
+					isError: recovery.status === "blocked",
+					details: { mode: "management", results: [], recovery },
+				};
+			}
 			if (action === "worktree.cleanup") {
 				if (deps.allowMutatingManagementActions === false) {
 					return { content: [{ type: "text", text: "Action 'worktree.cleanup' is not available from child-safe subagent fanout mode." }], isError: true, details: { mode: "management", results: [] } };

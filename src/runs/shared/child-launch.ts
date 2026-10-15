@@ -101,6 +101,8 @@ export interface BuildInProcessChildLaunchInput {
 	childAgentName: string;
 	childIndex: number;
 	nestedRoute?: { rootRunId: string; eventSink: string; controlInbox: string; capabilityToken: string };
+	/** Native resume admission only; never copied from the launching child's inherited runtime. */
+	recoveredNestedParentRunId?: string;
 	runFanoutBudget?: RunFanoutBudgetDescriptor;
 	structuredOutput?: StructuredOutputRuntime;
 	fast?: boolean;
@@ -240,6 +242,7 @@ export function buildInProcessChildLaunch(input: BuildInProcessChildLaunchInput)
 		...(parentRunId ? [{ runId: parentRunId, stepIndex: parentChildIndex, agent: input.childAgentName }] : []),
 	];
 	const nestedRoute = fanout ? (input.nestedRoute ?? inheritedRoute) : undefined;
+	if (input.recoveredNestedParentRunId !== undefined && (!fanout || input.host !== "runner" || !nestedRoute || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(input.recoveredNestedParentRunId))) throw new Error("Recovered nested ownership requires a native fanout runner and a valid route.");
 	const childDepth = resolveChildDepth(input.maxSubagentDepth, inherited);
 	const permissions = input.permissionRules && Object.keys(input.permissionRules).length > 0
 		? { rules: input.permissionRules, ...(input.permissionAuditPath ? { auditPath: input.permissionAuditPath } : {}) }
@@ -314,6 +317,7 @@ export function buildInProcessChildLaunch(input: BuildInProcessChildLaunchInput)
 		...(toolPlan.effectiveMcpTools.length > 0 ? { mcpDirectTools: toolPlan.effectiveMcpTools } : {}),
 		fast: input.fast === true,
 	};
+	if (input.recoveredNestedParentRunId) config.recoveredNestedParentRunId = input.recoveredNestedParentRunId;
 	const capturedHooks = createCapturedChildHooks(config);
 
 	const extensionPaths = toolPlan.extensionArgs.filter((extensionPath) => !isSubagentRuntimeExtensionPath(extensionPath));

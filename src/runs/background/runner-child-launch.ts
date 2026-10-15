@@ -15,6 +15,7 @@ export interface RunnerChildLaunchContext {
 	childIntercomTarget?: string;
 	orchestratorIntercomTarget?: string;
 	nestedRoute?: BuildInProcessChildLaunchInput["nestedRoute"];
+	recoveredNestedParentRunId?: BuildInProcessChildLaunchInput["recoveredNestedParentRunId"];
 	runFanoutBudget?: BuildInProcessChildLaunchInput["runFanoutBudget"];
 	capabilityCeiling?: BuildInProcessChildLaunchInput["capabilityCeiling"];
 	inheritedChildRuntime?: InheritedChildRuntime;
@@ -72,6 +73,7 @@ export function buildRunnerChildLaunch(step: RunnerSubagentStep, ctx: RunnerChil
 		childAgentName: step.agent,
 		childIndex: ctx.flatIndex,
 		nestedRoute: ctx.nestedRoute,
+		recoveredNestedParentRunId: ctx.recoveredNestedParentRunId,
 		runFanoutBudget: ctx.runFanoutBudget ? {
 			...ctx.runFanoutBudget,
 			...(step.runFanoutPath ? { parentPath: `${ctx.runFanoutBudget.parentPath ? `${ctx.runFanoutBudget.parentPath}/` : ""}${step.runFanoutPath}` } : {}),
