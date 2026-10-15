@@ -8,7 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createSubagentExecutor } from "../../src/runs/foreground/subagent-executor.ts";
+import { createSubagentExecutor, validateNestedSessionFile } from "../../src/runs/foreground/subagent-executor.ts";
 import { createNestedRoute, projectNestedEvents, readNestedRegistry, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import { createRunFanoutBudget, writeRunFanoutBudgetDescriptor } from "../../src/runs/shared/run-fanout-budget.ts";
 import { finalizeProcessTerminal, initializeProcessTerminal, writeProcessTerminalCandidate } from "../../src/runs/background/process-terminal.ts";
@@ -21,6 +21,8 @@ import type { ChildRuntimeConfig } from "../../src/runs/shared/child-runtime-con
 import { recoveredNestedBinding } from "../../src/runs/background/nested-recovery.ts";
 import { buildRunnerChildLaunch } from "../../src/runs/background/runner-child-launch.ts";
 import { inheritedChildRuntime } from "../../src/runs/shared/child-launch.ts";
+import { recoveredSessionFileForRun } from "../../src/runs/shared/recovered-nested-session.ts";
+import { readAsyncRecoveryDescriptor } from "../../src/runs/background/async-resume.ts";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const run of cleanup.splice(0).reverse()) run(); });
@@ -41,7 +43,8 @@ function fixture() {
     cleanup.push(() => fs.rmSync(path.dirname(childDir), { recursive: true, force: true }));
     const parentSessionFile = path.join(root, "parent.jsonl");
     const managerSessionFile = path.join(root, "manager.jsonl");
-    const childSessionFile = path.join(root, "coder.jsonl");
+    const childSessionFile = path.join(root, childId, "run-0", "session.jsonl");
+    fs.mkdirSync(path.dirname(childSessionFile), { recursive: true });
     for (const file of [parentSessionFile, managerSessionFile, childSessionFile]) {
         fs.writeFileSync(file, `${JSON.stringify({ type: "session", version: 3, id: randomUUID(), cwd: root })}\n`);
     }
@@ -52,7 +55,7 @@ function fixture() {
     function status(dir: string, id: string, agent: string, sessionFile: string) {
         const value: AsyncStatus = {
             runId: id, sessionId: parentSessionFile, mode: "single", state: "failed", startedAt: 1, endedAt: 3,
-            cwd: root, currentStep: 0, steps: [{ agent, status: "failed", sessionFile, exitCode: 1 }],
+            launchContractDigest: "f".repeat(64), cwd: root, currentStep: 0, steps: [{ agent, status: "failed", sessionFile, exitCode: 1 }],
         };
         fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify(value));
         const instance = randomUUID();
@@ -92,6 +95,23 @@ function fixture() {
     return { root, ownerRunId, childId, nestedRootRunId, route, ownerDir, childDir, parentSessionFile, managerSessionFile, childSessionFile, state, recover, executor, ctx, budget };
 }
 
+async function recoveredSessionFixture() {
+    const f = fixture();
+    fs.writeFileSync(path.join(f.childDir, "recovery-descriptor.json"), JSON.stringify({
+        version: 1, launchContractDigest: "f".repeat(64), sourceRunId: f.childId, agent: "coder", cwd: f.root,
+        sessionFile: f.childSessionFile, sessionDir: path.join(f.root, f.childId, "async-" + f.childId),
+        systemPromptMode: "replace", outputMode: "inline", inheritProjectContext: false, inheritSkills: false,
+        share: false, maxSubagentDepth: 3, runFanoutBudget: { ...f.budget, parentPath: "workflow[manager]/coder" },
+    }));
+    assert.notEqual((await f.recover()).isError, true);
+    const binding = recoveredNestedBinding(f.state, f.managerSessionFile, "coding-manager");
+    assert.ok(binding?.sessions[0]);
+    const run = readNestedRegistry(f.route).children[0];
+    assert.ok(run);
+    const descriptor = readAsyncRecoveryDescriptor(f.childDir);
+    assert.ok(descriptor);
+    return { ...f, binding, input: { run, rootRunId: f.nestedRootRunId, dir: f.childDir, descriptor, nativeOwnerRunId: f.ownerRunId, nativeSessions: binding.sessions } };
+}
 function resultText(value: Awaited<ReturnType<ReturnType<typeof fixture>["recover"]>>) {
     return value.content.filter(part => part.type === "text").map(part => part.text).join("\n");
 }
@@ -101,6 +121,96 @@ function recoveryReport(value: Awaited<ReturnType<ReturnType<typeof fixture>["re
 }
 
 describe("parent-scoped nested recovery", () => {
+    it("keeps exact-session grants native-only and does not inherit them to grandchildren", async () => {
+        const f = await recoveredSessionFixture();
+        const context = { cwd: f.root, id: randomUUID(), flatIndex: 0, nestedRoute: f.route, recoveredNestedParentRunId: f.ownerRunId, recoveredNestedSessions: f.binding.sessions };
+        const step = { agent: "coding-manager", task: "recover", tools: ["subagent"], allowNestedSubagents: true, allowedAgents: ["coder"], inheritProjectContext: false, inheritGlobalContext: false, inheritSkills: false };
+        const launch = buildRunnerChildLaunch(step, context, { sessionEnabled: false, watchdogStatus() {} });
+        assert.deepEqual(launch.config.recoveredNestedSessions, f.binding.sessions);
+        assert.throws(() => buildRunnerChildLaunch(step, { ...context, recoveredNestedSessions: [...f.binding.sessions, ...f.binding.sessions] }, { sessionEnabled: false, watchdogStatus() {} }), /duplicate run identity/);
+        assert.equal(Object.hasOwn(inheritedChildRuntime(launch.config) ?? {}, "recoveredNestedSessions"), false);
+        assert.throws(() => buildRunnerChildLaunch(step, { ...context, recoveredNestedParentRunId: undefined }, { sessionEnabled: false, watchdogStatus() {} }), /recovered ownership/);
+    });
+    it("does not authorize another run in the same recovered root", async () => {
+        const f = await recoveredSessionFixture();
+        const other = { ...f.input.run, id: randomUUID() };
+        const exact = recoveredSessionFileForRun({ ...f.input, run: other });
+        assert.equal(exact, undefined);
+        assert.throws(() => validateNestedSessionFile(other, [], f.input.descriptor, exact), /outside trusted/);
+    });
+    for (const changed of ["descriptor", "file"] as const) {
+        it("rejects evidence changed while validation is in progress: " + changed, async t => {
+            const f = await recoveredSessionFixture();
+            const read = fsDefault.readFileSync;
+            let injected = false;
+            const trigger = path.join(f.childDir, changed === "descriptor" ? "status.json" : "recovery-descriptor.json");
+            t.mock.method(fsDefault, "readFileSync", (...args: Parameters<typeof fsDefault.readFileSync>) => {
+                const bytes = read(...args);
+                if (!injected && String(args[0]) === trigger) {
+                    injected = true;
+                    if (changed === "descriptor") fs.appendFileSync(path.join(f.childDir, "recovery-descriptor.json"), " ");
+                    else {
+                        const contents = read(f.childSessionFile);
+                        fs.renameSync(f.childSessionFile, f.childSessionFile + ".replaced");
+                        fs.writeFileSync(f.childSessionFile, contents);
+                    }
+                }
+                return bytes;
+            });
+            syncBuiltinESMExports();
+            t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+            assert.throws(() => recoveredSessionFileForRun(f.input), /session/);
+            assert.equal(injected, true);
+            assert.equal(f.state.asyncJobs.size, 0);
+            assert.equal(inspectSessionLease(f.parentSessionFile).state, "free");
+        });
+    }
+    it("admits the verified exact file outside ordinary roots without extending them", async () => {
+        const f = await recoveredSessionFixture();
+        const roots: string[] = [];
+        assert.throws(() => validateNestedSessionFile(f.input.run, roots, f.input.descriptor), /outside trusted/);
+        const exact = recoveredSessionFileForRun(f.input);
+        assert.equal(validateNestedSessionFile(f.input.run, roots, f.input.descriptor, exact), fs.realpathSync(f.childSessionFile));
+        assert.deepEqual(roots, []);
+        assert.equal(recoveredSessionFileForRun({ ...f.input, nativeOwnerRunId: undefined }), undefined);
+    });
+    for (const wrong of ["root", "owner", "agent", "recorded-file", "descriptor", "replaced-file", "symlink"] as const) {
+        it("rejects changed recovered session evidence: " + wrong, async () => {
+            const f = await recoveredSessionFixture();
+            if (wrong === "root") f.input.rootRunId = randomUUID();
+            if (wrong === "owner") f.input.nativeOwnerRunId = randomUUID();
+            if (wrong === "agent") f.input.run.agent = "other-agent";
+            if (wrong === "recorded-file") f.input.run.sessionFile = f.parentSessionFile;
+            if (wrong === "descriptor") fs.appendFileSync(path.join(f.childDir, "recovery-descriptor.json"), "\\n");
+            if (wrong === "replaced-file") {
+                const bytes = fs.readFileSync(f.childSessionFile);
+                fs.renameSync(f.childSessionFile, f.childSessionFile + ".old");
+                fs.writeFileSync(f.childSessionFile, bytes);
+            }
+            if (wrong === "symlink") {
+                fs.renameSync(f.childSessionFile, f.childSessionFile + ".old");
+                fs.symlinkSync(f.childSessionFile + ".old", f.childSessionFile);
+            }
+            assert.throws(() => recoveredSessionFileForRun(f.input), /session/);
+        });
+    }
+    it("captures only the verified custom-path child session in its private binding", async () => {
+        const f = fixture();
+        fs.writeFileSync(path.join(f.childDir, "recovery-descriptor.json"), JSON.stringify({
+            version: 1, launchContractDigest: "f".repeat(64), sourceRunId: f.childId, agent: "coder", cwd: f.root, sessionFile: f.childSessionFile,
+            sessionDir: path.join(f.root, f.childId, "async-" + f.childId),
+            systemPromptMode: "replace", outputMode: "inline", inheritProjectContext: false,
+            inheritSkills: false, share: false, maxSubagentDepth: 3,
+            runFanoutBudget: { ...f.budget, parentPath: "workflow[manager]/coder" },
+        }));
+        const result = await f.recover();
+        assert.notEqual(result.isError, true, resultText(result));
+        const binding = recoveredNestedBinding(f.state, f.managerSessionFile, "coding-manager");
+        assert.equal(binding?.sessions?.[0]?.canonicalSessionFile, fs.realpathSync(f.childSessionFile));
+        assert.equal(binding?.sessions?.[0]?.runId, f.childId);
+        assert.equal(binding?.sessions?.length, 1);
+        assert.equal(f.state.asyncJobs.size, 0);
+    });
     it("refuses a redirected lease namespace before taking reservations", async () => {
         const f = fixture();
         const original = path.join(f.root, "original-leases");
@@ -187,7 +297,7 @@ describe("parent-scoped nested recovery", () => {
         it("checks the recovery descriptor parentPath: " + (parentPath ?? "absent"), async () => {
             const f = fixture();
             fs.writeFileSync(path.join(f.childDir, "recovery-descriptor.json"), JSON.stringify({
-                version: 1, sourceRunId: f.childId, agent: "coder", cwd: f.root, sessionFile: f.childSessionFile,
+                version: 1, launchContractDigest: "f".repeat(64), sourceRunId: f.childId, agent: "coder", cwd: f.root, sessionFile: f.childSessionFile,
                 systemPromptMode: "replace", outputMode: "inline", inheritProjectContext: false,
                 inheritSkills: false, share: false, maxSubagentDepth: 3,
                 runFanoutBudget: { ...f.budget, parentPath },

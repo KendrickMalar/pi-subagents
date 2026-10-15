@@ -75,6 +75,9 @@ it("original SDK parent recovers a timed-out native manager and the revived mana
     process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.PI_OFFLINE = "1";
     process.env.PI_SUBAGENTS_NATIVE_RECOVERY_AUDIT = audit;
+    const taskDir = path.join(root, "other-task-worktree");
+    fs.mkdirSync(taskDir, { recursive: true });
+    process.env.PI_SUBAGENTS_NATIVE_RECOVERY_TASK_DIR = taskDir;
     fs.mkdirSync(path.join(root, ".pi", "agents"), { recursive: true });
     fs.mkdirSync(agentDir, { recursive: true });
     fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false } }));
@@ -143,6 +146,9 @@ it("original SDK parent recovers a timed-out native manager and the revived mana
         trace("worker-closed");
         assert.equal(readStatus(child.childDir)?.state, "failed");
         const beforeProof = fs.readFileSync(path.join(child.childDir, "process-terminal.json"));
+        const oldChildStatus = readStatus(child.childDir);
+        assert.ok(oldChildStatus?.steps?.[0]?.sessionFile?.startsWith(taskDir + path.sep));
+        const oldChildFile = oldChildStatus.steps[0].sessionFile;
         await waitForClose(foreignDir, foreignManagerId, AbortSignal.timeout(15000));
         const foreignChild = nestedOwner(foreignManagerId);
         const foreignId = foreignChild.childId;
@@ -176,12 +182,26 @@ it("original SDK parent recovers a timed-out native manager and the revived mana
         await waitForClose(revivedDir, revived, AbortSignal.timeout(10000));
         trace("revival-closed");
         assert.equal(finished.exitCode, 0, finished.error ?? finished.output);
-        assert.match(finished.output, /RECOVERED_CHILD_STATUS_OK/);
+        assert.match(finished.output, /CHILD_CONTINUATION_CONSUMED/);
         const final = readStatus(revivedDir);
         assert.ok(final?.steps?.[0]?.sessionFile);
         assert.equal(inspectSessionLease(final.steps[0].sessionFile).state, "free");
         const events = fs.readFileSync(audit, "utf8").trim().split("\n").map(line => auditParser.Parse(JSON.parse(line)));
         assert.ok(events.some(event => event.event === "blocking" && event.model === "worker"));
+        const continued = events.find(event => event.event === "child-resumed");
+        assert.ok(continued?.childId);
+        const location = resolveSubagentRunId(continued.childId, { state });
+        assert.equal(location?.kind, "nested");
+        assert.ok(location && location.kind === "nested" && location.match.run.asyncDir);
+        await waitForClose(location.match.run.asyncDir, continued.childId, AbortSignal.timeout(10000));
+        const childFinal = readStatus(location.match.run.asyncDir);
+        assert.equal(childFinal?.state, "complete");
+        assert.equal(childFinal.steps?.[0]?.sessionFile, oldChildFile);
+        assert.ok(oldChildFile);
+        assert.equal(inspectSessionLease(oldChildFile).state, "free");
+        assert.equal(events.filter(event => event.event === "worker-continuation-complete").length, 1);
+        assert.equal(readStatus(child.childDir)?.state, "failed");
+        assert.deepEqual(fs.readFileSync(path.join(child.childDir, "process-terminal.json")), beforeProof);
         assert.ok(events.some(event => event.event === "former-child-consumed" && event.childId === child.childId));
         assert.ok(events.some(event => event.event === "foreign-child-rejected" && event.childId === foreignId));
         assert.equal(events.filter(event => event.event === "resumed-manager-entry").length, 1, "The lease must prevent a second native manager dispatch.");
@@ -207,7 +227,7 @@ it("original SDK parent recovers a timed-out native manager and the revived mana
         throw error;
     } finally {
         session.dispose();
-        for (const key of ["PI_CODING_AGENT_DIR", "PI_OFFLINE", "PI_SUBAGENTS_NATIVE_RECOVERY_AUDIT"]) {
+        for (const key of ["PI_CODING_AGENT_DIR", "PI_OFFLINE", "PI_SUBAGENTS_NATIVE_RECOVERY_AUDIT", "PI_SUBAGENTS_NATIVE_RECOVERY_TASK_DIR"]) {
             if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key];
         }
         // The isolated suite owns cleanup. Failure evidence, when requested, is outside its auto-cleaned root.

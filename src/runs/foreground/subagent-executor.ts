@@ -225,6 +225,7 @@ import {
 } from "../../shared/types.ts";
 import { deriveChildSessionName } from "../../shared/child-session-name.ts";
 import { recoverNestedRunTree, recoveredNestedBinding, type NestedRecoveryResult } from "../background/nested-recovery.ts";
+import { recoveredSessionFileForRun } from "../shared/recovered-nested-session.ts";
 
 const MUTATING_MANAGEMENT_ACTIONS = new Set(["recover", "command.yield", "command.cancel", "create", "update", "delete", "eject", "disable", "enable", "reset", "grant-spawn-budget", "watchdog.configure", "mission.create", "mission.update", "mission.resolve-decision", "mission.attach-run", "mission.close", "inspector.open", "inspector.close", "project.open", "project.close", "worktree.discard", "worktree.cleanup", "lane.recordMerge", "lane.recordSupersession", "refine", "refine.rollback", "dismiss", "schedule.create", "schedule.pause", "schedule.resume", "schedule.run", "schedule.run-due", "schedule.delete"]);
 const DESTRUCTIVE_MANAGEMENT_ACTIONS = new Set(["command.cancel", "delete", "eject", "disable", "reset", "mission.close", "worktree.discard", "refine.rollback", "inspector.close", "project.close", "stop", "interrupt", "schedule.delete"]);
@@ -637,6 +638,9 @@ function formatForegroundActivity(control: SubagentState["foregroundControls"] e
 	return [`active ${seconds}s ago`, ...facts].join(" | ");
 }
 
+function recoveredSessionContext(deps: ExecutorDeps) {
+	return { nativeOwnerRunId: deps.childRuntime?.recoveredNestedParentRunId, nativeSessions: deps.childRuntime?.recoveredNestedSessions };
+}
 function nestedResolutionScopeForExecutor(deps: ExecutorDeps): NestedRunResolutionScope | undefined {
 	if (deps.allowMutatingManagementActions !== false) return undefined;
 	const route = inheritedNestedRoute(deps);
@@ -1525,7 +1529,7 @@ function pathWithin(base: string, candidate: string): boolean {
 	return resolvedCandidate === resolvedBase || resolvedCandidate.startsWith(`${resolvedBase}${path.sep}`);
 }
 
-export function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: string[], recoveryDescriptor?: SteeringRecoveryDescriptor): string {
+export function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: string[], recoveryDescriptor?: SteeringRecoveryDescriptor, exactNativeSessionFile?: string): string {
 	const sessionFile = nestedRunSessionFile(run);
 	if (!sessionFile) throw new Error(`Nested run '${run.id}' does not have a persisted session file to resume from.`);
 	if (path.extname(sessionFile) !== ".jsonl") throw new Error(`Nested run '${run.id}' session file must be a .jsonl file: ${sessionFile}`);
@@ -1538,7 +1542,7 @@ export function validateNestedSessionFile(run: NestedRunSummary, trustedSessionR
 	const trustedRoots = trustedSessionRoots
 		.filter((root) => fs.existsSync(root))
 		.map((root) => fs.realpathSync(root));
-	if (!trustedRoots.some((root) => pathWithin(root, realSessionFile))) {
+	if (realSessionFile !== exactNativeSessionFile && !trustedRoots.some((root) => pathWithin(root, realSessionFile))) {
 		throw new Error(`Nested run '${run.id}' session file is outside trusted nested session roots: ${sessionFile}`);
 	}
 	// A revival continues its source's session file; its own launch descriptor names the run that owns that file.
@@ -1548,7 +1552,7 @@ export function validateNestedSessionFile(run: NestedRunSummary, trustedSessionR
 		? recoveryDescriptor.sessionOwnerRunId
 		: run.id;
 	// Only directories below a trusted root can name the owner; ancestors such as the root itself never count.
-	const ownedBelowTrustedRoot = trustedRoots.some((root) => pathWithin(root, realSessionFile)
+	const ownedBelowTrustedRoot = realSessionFile === exactNativeSessionFile || trustedRoots.some((root) => pathWithin(root, realSessionFile)
 		&& path.relative(root, realSessionFile).split(path.sep).slice(0, -1).includes(owner));
 	if (!ownedBelowTrustedRoot) {
 		throw new Error(`Nested run '${run.id}' session file is not under that nested run's session directory: ${sessionFile}`);
@@ -1564,7 +1568,7 @@ export function readNestedRecoveryDescriptor(asyncDir: string | undefined, runId
 	return recoveryDescriptor;
 }
 
-function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "nested" }, trustedSessionRoots: string[]): NestedResumeSourceTarget {
+function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "nested" }, trustedSessionRoots: string[], recoveredContext?: ReturnType<typeof recoveredSessionContext>): NestedResumeSourceTarget {
 	const run = match.match.run;
 	if (run.state === "running" || run.state === "queued") throw new Error(`Nested run '${run.id}' is live; route the follow-up to the owner process instead.`);
 	if (run.state === "stopped") throw new Error(`Nested run '${run.id}' was stopped and cannot be resumed. Start a new run instead.`);
@@ -1573,6 +1577,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 	const state = run.state === "complete" || run.state === "failed" || run.state === "paused" ? run.state : "failed";
 	const asyncDir = resolveNestedAsyncDir(match.match.rootRunId, run);
 	const recoveryDescriptor = readNestedRecoveryDescriptor(asyncDir, run.id, agent);
+	const exactNativeSessionFile = asyncDir ? recoveredSessionFileForRun({ run, rootRunId: match.match.rootRunId, dir: asyncDir, descriptor: recoveryDescriptor, nativeOwnerRunId: recoveredContext?.nativeOwnerRunId, nativeSessions: recoveredContext?.nativeSessions }) : undefined;
 	return compactOptional<NestedResumeSourceTarget>({
 		kind: "revive",
 		source: "nested",
@@ -1581,7 +1586,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 		agent,
 		index: 0,
 		cwd: asyncDir ? path.dirname(asyncDir) : undefined,
-		sessionFile: validateNestedSessionFile(run, trustedSessionRoots, recoveryDescriptor),
+		sessionFile: validateNestedSessionFile(run, trustedSessionRoots, recoveryDescriptor, exactNativeSessionFile),
 		...(run.capabilityCeiling ? { capabilityCeiling: run.capabilityCeiling } : {}),
 		...(recoveryDescriptor ? { recoveryDescriptor } : {}),
 	});
@@ -1918,7 +1923,7 @@ function resolveRequestedResumeTarget(params: SubagentParamsLike, deps: Executor
 			...(deps.config.defaultSessionDir ? [path.resolve(deps.expandTilde(deps.config.defaultSessionDir))] : []),
 			...(parentSessionFile ? [deps.getSubagentSessionRoot(parentSessionFile)] : []),
 		];
-		return resolveNestedResumeTarget(resolved, trustedSessionRoots);
+		return resolveNestedResumeTarget(resolved, trustedSessionRoots, recoveredSessionContext(deps));
 	}
 	return resolveResumeTarget(params, deps.state, { asyncRequireSessionFile: false });
 }
@@ -2276,6 +2281,7 @@ async function resumeAsyncRun(input: {
 		recoveryAgentConfig,
 		nestedRoute: recoveredOwnership?.route,
 		recoveredNestedParentRunId: recoveredOwnership?.ownerRunId,
+		recoveredNestedSessions: recoveredOwnership?.sessions,
 		// A retained contract cannot silently acquire runtime definitions registered later.
 		runtimeAgentSnapshot: recoveryDescriptor ? recoveryDescriptor.runtimeAgentSnapshot ?? {version: 1, agents: []} : foregroundContract ? foregroundContract.runtimeAgentSnapshot ?? {version: 1, agents: []} : undefined,
 		ctx: compactOptional<Parameters<typeof executeAsyncSingle>[1]["ctx"]>({

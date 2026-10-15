@@ -76,6 +76,7 @@ export interface ChildRuntimeConfig {
 	nestedParent?: ChildNestedParent;
 	/** Verified former manager subtree, granted only by the original parent's recover operation. Not inherited by grandchildren. */
 	recoveredNestedParentRunId?: string;
+	recoveredNestedSessions?: import("./recovered-nested-session.ts").RecoveredNestedSession[];
 	runFanoutBudget?: RunFanoutBudgetDescriptor;
 	/** Nesting depth of this child (1 for a top-level parent's child). */
 	depth: number;

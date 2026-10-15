@@ -4,6 +4,7 @@
  * children are built in the parent process; background children are built in
  * the detached runner from the step it received in its config.
  */
+import { parseRecoveredNestedSessions } from "./recovered-nested-session.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ChildWatchdogConfig, ChildWatchdogStatusEvent } from "../../watchdog/child-status.ts";
@@ -103,6 +104,7 @@ export interface BuildInProcessChildLaunchInput {
 	nestedRoute?: { rootRunId: string; eventSink: string; controlInbox: string; capabilityToken: string };
 	/** Native resume admission only; never copied from the launching child's inherited runtime. */
 	recoveredNestedParentRunId?: string;
+	recoveredNestedSessions?: import("./recovered-nested-session.ts").RecoveredNestedSession[];
 	runFanoutBudget?: RunFanoutBudgetDescriptor;
 	structuredOutput?: StructuredOutputRuntime;
 	fast?: boolean;
@@ -318,6 +320,12 @@ export function buildInProcessChildLaunch(input: BuildInProcessChildLaunchInput)
 		fast: input.fast === true,
 	};
 	if (input.recoveredNestedParentRunId) config.recoveredNestedParentRunId = input.recoveredNestedParentRunId;
+	if (input.recoveredNestedSessions !== undefined) {
+		if (!input.recoveredNestedParentRunId || !nestedRoute) throw new Error("Recovered sessions require native recovered ownership.");
+		const sessions = parseRecoveredNestedSessions(input.recoveredNestedSessions);
+		if (sessions.some(item => item.ownerRunId !== input.recoveredNestedParentRunId || item.rootRunId !== nestedRoute.rootRunId)) throw new Error("Recovered session ownership does not match the native route.");
+		config.recoveredNestedSessions = sessions;
+	}
 	const capturedHooks = createCapturedChildHooks(config);
 
 	const extensionPaths = toolPlan.extensionArgs.filter((extensionPath) => !isSubagentRuntimeExtensionPath(extensionPath));

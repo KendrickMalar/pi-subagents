@@ -1,9 +1,13 @@
 import * as fs from "node:fs";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import * as path from "node:path";
+import { Type } from "typebox";
+import { Compile } from "typebox/compile";
+const resumeParser = Compile(Type.Object({ asyncId: Type.String({ minLength: 1 }) }, { additionalProperties: true }));
 
 interface RecoveryFixtureAudit {
-    event: "model-output" | "blocking" | "former-child-consumed" | "model-error" | "resumed-manager-entry" | "foreign-child-rejected";
+    event: "model-output" | "blocking" | "former-child-consumed" | "model-error" | "resumed-manager-entry" | "foreign-child-rejected" | "child-resumed" | "worker-continuation-complete";
     model?: string;
     childId?: string;
     content?: AssistantMessage["content"];
@@ -29,6 +33,10 @@ export default function (pi: ExtensionAPI) {
                     const text = (message: { content: string | Array<{ type: string; text?: string }> }) => Array.isArray(message.content) ? message.content.map(part => part.text ?? "").join("\n") : message.content;
                     const results = context.messages.filter(message => message.role === "toolResult");
                     const users = context.messages.filter(message => message.role === "user").map(text).join("\n");
+                    const resumedWorker = results.findLast(message => message.toolCallId === "resume-owned-child");
+                    const waitedWorker = results.findLast(message => message.toolCallId === "wait-resumed-child");
+                    const foreignResume = results.findLast(message => message.toolCallId === "resume-foreign-child");
+                    const workerResult = results.findLast(message => message.toolCallId === "read-resumed-child-result");
                     if (model.id === "parent") {
                         output.content = [{ type: "text", text: "PARENT_READY" }];
                     } else if (model.id === "manager" && users.includes("RECOVERED_MANAGER")) {
@@ -45,13 +53,37 @@ export default function (pi: ExtensionAPI) {
                         } else if (!foreign) {
                             append({ event: "former-child-consumed", childId: id });
                             output.content = [{ type: "toolCall", id: "inspect-foreign-child", name: "subagent", arguments: { action: "status", id: foreignId } }];
-                        } else {
-                            if (!foreign.isError) throw new Error("Recovered manager accessed a foreign worker.");
+                        } else if (!foreign.isError) {
+                            throw new Error("Recovered manager accessed a foreign worker.");
+                        } else if (!foreignResume) {
                             append({ event: "foreign-child-rejected", childId: foreignId });
-                            output.content = [{ type: "text", text: "RECOVERED_CHILD_STATUS_OK" }];
+                            output.content = [{ type: "toolCall", id: "resume-foreign-child", name: "subagent", arguments: { action: "resume", id: foreignId, message: "WORKER_CONTINUE" } }];
+                        } else if (!foreignResume.isError) {
+                            throw new Error("Recovered manager resumed a foreign worker.");
+                        } else if (!resumedWorker) {
+                            output.content = [{ type: "toolCall", id: "resume-owned-child", name: "subagent", arguments: { action: "resume", id, message: "WORKER_CONTINUE", timeoutMs: 10000 } }];
+                        } else if (resumedWorker.isError) {
+                            throw new Error("OWNED_CHILD_RESUME_REJECTED: " + text(resumedWorker));
+                        } else if (!waitedWorker) {
+                            const launched = resumeParser.Parse(resumedWorker.details);
+                            append({ event: "child-resumed", childId: launched.asyncId });
+                            output.content = [{ type: "toolCall", id: "wait-resumed-child", name: "bg_wait", arguments: { id: launched.asyncId, timeoutMs: 20000 } }];
+                        } else if (!workerResult) {
+                            if (waitedWorker.isError) throw new Error("The worker continuation wait failed: " + text(waitedWorker));
+                            const resultFile = text(waitedWorker).match(/Result \[[^\]]+\]: ([^\n]+)/)?.[1];
+                            if (!resultFile) throw new Error("Native bg_wait omitted the worker result reference.");
+                            output.content = [{ type: "toolCall", id: "read-resumed-child-result", name: "read", arguments: { path: resultFile } }];
+                        } else {
+                            if (workerResult.isError || !text(workerResult).includes("CHILD_CONTINUATION_OK")) throw new Error("The actual worker result was not consumed: " + text(workerResult));
+                            output.content = [{ type: "text", text: "RECOVERED_CHILD_STATUS_OK CHILD_CONTINUATION_CONSUMED" }];
                         }
+                    } else if (model.id === "worker" && users.includes("WORKER_CONTINUE")) {
+                        append({ event: "worker-continuation-complete", model: model.id });
+                        output.content = [{ type: "text", text: "CHILD_CONTINUATION_OK" }];
                     } else if (model.id === "manager" && !results.some(message => message.toolName === "subagent")) {
-                        output.content = [{ type: "toolCall", id: "launch-owned-worker", name: "subagent", arguments: { agent: "worker", task: "BLOCK_UNTIL_OWNER_TIMEOUT", async: true, timeoutMs: 12000 } }];
+                        const taskDir = process.env.PI_SUBAGENTS_NATIVE_RECOVERY_TASK_DIR;
+                        if (!taskDir) throw new Error("The native task session directory is missing.");
+                        output.content = [{ type: "toolCall", id: "launch-owned-worker", name: "subagent", arguments: { agent: "worker", task: "BLOCK_UNTIL_OWNER_TIMEOUT", cwd: taskDir, sessionDir: path.join(taskDir, ".task-artifacts", "sessions"), async: true, timeoutMs: 12000 } }];
                     } else {
                         append({ event: "blocking", model: model.id });
                         const signal = options?.signal;

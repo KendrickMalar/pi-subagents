@@ -11,6 +11,7 @@ import { readProcessTerminal, readProcessTerminalCandidate } from "./process-ter
 import { Type, type Static } from "typebox";
 import { Compile } from "typebox/compile";
 import { readAsyncRecoveryDescriptor } from "./async-resume.ts";
+import { captureRecoveredNestedSession, type RecoveredNestedSession } from "../shared/recovered-nested-session.ts";
 
 export interface NestedRecoveryChild {
     id: string;
@@ -36,6 +37,7 @@ export interface RecoveredNestedBinding {
     route: NestedRouteInfo;
     ownerStatusDigest: string;
     ownerAsyncDir: string;
+    sessions: RecoveredNestedSession[];
 }
 const bindings = new WeakMap<SubagentState, Map<string, RecoveredNestedBinding>>();
 
@@ -222,6 +224,7 @@ export function recoverNestedRunTree(request: { ownerRunId: string; nestedRootRu
         const runs = descendants(projected.children, ownerRunId);
         if (!runs.length) return blocked("ROOT_NOT_FOUND", "The root has no descendants belonging to this owner.");
         const checked: NestedRecoveryChild[] = [];
+        const recoveredSessions: RecoveredNestedSession[] = [];
         const sourceDigests = new Map<string, string>([[ownerDir, ownerStatusDigest]]);
         const sources = new Map<string, AsyncStatus>([[ownerDir, owner]]);
         const sessions = new Set([managerSessionFile]);
@@ -266,6 +269,15 @@ export function recoverNestedRunTree(request: { ownerRunId: string; nestedRootRu
                 if (digestStatus(dir) !== sourceDigests.get(dir)) return blocked("PRECONDITION_FAILED", "The run state changed before recovery publication.");
                 verifyTerminal(dir, status, reservations);
             }
+            for (const child of checked) {
+                if (!child.resumable) continue;
+                const dir = path.join(TEMP_ROOT_DIR, "nested-subagent-runs", nestedRootRunId, child.id);
+                const status = sources.get(dir);
+                if (!status) return blocked("INVALID_METADATA", "The verified child status was lost.");
+                const grant = captureRecoveredNestedSession({ ownerRunId, rootRunId: nestedRootRunId, dir, status, canonicalSessionFile: sessionOf(status, reservations) });
+                child.resumable = grant !== undefined;
+                if (grant) recoveredSessions.push(grant);
+            }
             // The sidecar and audit are published while every canonical session is reserved.
             const reconciled = projectNestedEvents(route);
             const finalRuns = descendants(reconciled.children, ownerRunId);
@@ -281,7 +293,7 @@ export function recoverNestedRunTree(request: { ownerRunId: string; nestedRootRu
         }
         context.state.currentSessionId = context.parentSessionFile;
         retainNestedLookupRoute(context.state, route, context.parentSessionFile);
-        const ticket: RecoveredNestedBinding = { ownerRunId, ownerSessionFile: parent, managerSessionFile, managerAgent, route, ownerStatusDigest, ownerAsyncDir: ownerDir };
+        const ticket: RecoveredNestedBinding = { ownerRunId, ownerSessionFile: parent, managerSessionFile, managerAgent, route, ownerStatusDigest, ownerAsyncDir: ownerDir, sessions: recoveredSessions };
         let map = bindings.get(context.state);
         if (!map) { map = new Map(); bindings.set(context.state, map); }
         map.set(managerSessionFile, ticket);

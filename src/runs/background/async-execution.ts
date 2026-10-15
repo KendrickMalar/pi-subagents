@@ -322,6 +322,7 @@ interface AsyncSingleParams {
 	nestedRoute?: NestedRouteInfo;
 	/** Host-verified recovery admission; not a model-facing launch option. */
 	recoveredNestedParentRunId?: string;
+	recoveredNestedSessions?: import("../shared/recovered-nested-session.ts").RecoveredNestedSession[];
 	acceptance?: AcceptanceInput;
 	timeoutMs?: number;
 	absoluteDeadlineAt?: number;
@@ -2313,6 +2314,7 @@ export function executeAsyncSingle(
 				...(params.revivalLease ? { revivalLease: params.revivalLease } : {}),
 				nestedRoute: nestedRoute ?? inheritedNestedRoute,
 				recoveredNestedParentRunId: params.recoveredNestedParentRunId,
+				recoveredNestedSessions: params.recoveredNestedSessions,
 				...(launcher ? { launcher } : {}),
 				nestedSelf: inheritedNestedRoute && nestedAddress ? {
 					parentRunId: nestedAddress.parentRunId,
