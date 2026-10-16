@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import registerFanoutChildSubagentExtension from "../../src/extension/fanout-child.ts";
-import { createSubagentExecutor, readNestedRecoveryDescriptor, validateNestedSessionFile } from "../../src/runs/foreground/subagent-executor.ts";
+import { createSubagentExecutor, readNestedRecoveryDescriptor, resolveNestedResumeCwd, validateNestedSessionFile } from "../../src/runs/foreground/subagent-executor.ts";
 import { createNestedRoute, findNestedControlResult, nestedResultsPath, projectNestedEvents, readNestedControlRequests, readNestedControlResults, snapshotNestedEventFiles, writeNestedControlRequest, writeNestedControlResult, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import type { ChildRuntimeConfig } from "../../src/runs/shared/child-runtime-config.ts";
 import { ASYNC_DIR, RESULTS_DIR, TEMP_ROOT_DIR, type SubagentState } from "../../src/shared/types.ts";
@@ -373,6 +373,22 @@ describe("nested control routing", () => {
 				const payload = event.payload as { to?: unknown };
 				return payload.to === "attacker-target" || payload.to === "attacker-leaf";
 			}), false);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("revives a nested run in its recorded cwd, not the nested run directory", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-resume-cwd-"));
+		try {
+			const worktree = path.join(root, "worktree");
+			const other = path.join(root, "other");
+			fs.mkdirSync(worktree);
+			fs.mkdirSync(other);
+			assert.equal(resolveNestedResumeCwd("nested-cwd", { cwd: worktree } as any, { cwd: other } as any), worktree);
+			assert.equal(resolveNestedResumeCwd("nested-cwd", null, { cwd: worktree } as any), worktree);
+			assert.equal(resolveNestedResumeCwd("nested-cwd", null, undefined), undefined);
+			assert.throws(() => resolveNestedResumeCwd("nested-cwd", { cwd: path.join(root, "gone") } as any, undefined), /required cwd does not exist/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

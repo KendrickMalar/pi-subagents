@@ -1568,6 +1568,19 @@ export function readNestedRecoveryDescriptor(asyncDir: string | undefined, runId
 	return recoveryDescriptor;
 }
 
+/** A revived nested run works where its source ran; the nested run directory only holds its records. */
+export function resolveNestedResumeCwd(runId: string, status: Pick<AsyncStatus, "cwd"> | null | undefined, recoveryDescriptor: Pick<SteeringRecoveryDescriptor, "cwd"> | undefined): string | undefined {
+	const cwd = status?.cwd ?? recoveryDescriptor?.cwd;
+	if (!cwd) return undefined;
+	const resolved = path.resolve(cwd);
+	try {
+		if (!fs.statSync(resolved).isDirectory()) throw new Error("path is not a directory");
+	} catch (error) {
+		throw new Error(`Nested run '${runId}' required cwd does not exist: ${cwd}`, { cause: error instanceof Error ? error : undefined });
+	}
+	return resolved;
+}
+
 function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "nested" }, trustedSessionRoots: string[], recoveredContext?: ReturnType<typeof recoveredSessionContext>): NestedResumeSourceTarget {
 	const run = match.match.run;
 	if (run.state === "running" || run.state === "queued") throw new Error(`Nested run '${run.id}' is live; route the follow-up to the owner process instead.`);
@@ -1585,7 +1598,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 		state,
 		agent,
 		index: 0,
-		cwd: asyncDir ? path.dirname(asyncDir) : undefined,
+		cwd: resolveNestedResumeCwd(run.id, asyncDir ? readNestedRunStatus(asyncDir, run) : null, recoveryDescriptor),
 		sessionFile: validateNestedSessionFile(run, trustedSessionRoots, recoveryDescriptor, exactNativeSessionFile),
 		...(run.capabilityCeiling ? { capabilityCeiling: run.capabilityCeiling } : {}),
 		...(recoveryDescriptor ? { recoveryDescriptor } : {}),
