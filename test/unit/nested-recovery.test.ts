@@ -420,6 +420,20 @@ describe("parent-scoped nested recovery", () => {
         assert.equal(resolveSubagentRunId(f.childId, { state: other }), undefined);
     });
 
+    it("recovers a child that an older registry dropped after its events were marked processed", async () => {
+        const f = fixture();
+        projectNestedEvents(f.route);
+        const registryFile = path.join(path.dirname(f.route.eventSink), "registry.json");
+        const stored = JSON.parse(fs.readFileSync(registryFile, "utf-8")) as { children: Array<{ id: string }>; schemaVersion?: number };
+        const legacy = { ...stored, children: stored.children.filter(child => child.id !== f.childId) };
+        delete legacy.schemaVersion;
+        fs.writeFileSync(registryFile, JSON.stringify(legacy));
+        const result = await f.recover();
+        assert.notEqual(result.isError, true, resultText(result));
+        assert.deepEqual(recoveryReport(result)?.descendants?.map(child => ({ id: child.id, state: child.state })), [{ id: f.childId, state: "failed" }]);
+        assert.equal(resolveSubagentRunId(f.childId, { state: f.state })?.kind, "nested");
+    });
+
     it("refuses a different parent before projecting pending events", async () => {
         const f = fixture();
         const stranger = path.join(f.root, "stranger.jsonl");

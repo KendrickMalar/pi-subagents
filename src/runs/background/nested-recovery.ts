@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { DIRS, TEMP_ROOT_DIR, type AsyncStatus, type NestedRouteInfo, type NestedRunSummary, type SubagentState } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
-import { applyNestedEvent, isSafeNestedId, NESTED_EVENTS_DIR, parseNestedEventRecords, projectNestedEvents, readNestedRegistry, resolveNestedRoute, retainNestedLookupRoute } from "../shared/nested-events.ts";
+import { applyNestedEvent, isSafeNestedId, NESTED_EVENTS_DIR, nestedRegistryNeedsReplay, parseNestedEventRecords, projectNestedEvents, readNestedRegistry, resolveNestedRoute, retainNestedLookupRoute } from "../shared/nested-events.ts";
 import { acquireSessionLease, canonicalSessionFilePath, inspectSessionLease, SessionLeaseConflictError, SESSION_LEASES_DIR, type SessionLeaseHandle } from "../shared/session-lease.ts";
 import { readRunFanoutBudgetDescriptor, validateRunFanoutBudgetDescriptor } from "../shared/run-fanout-budget.ts";
 import { readProcessTerminal, readProcessTerminalCandidate } from "./process-terminal.ts";
@@ -210,7 +210,7 @@ export function recoverNestedRunTree(request: { ownerRunId: string; nestedRootRu
         const route = routeForRoot(nestedRootRunId);
         // Build a read-only projection first. No registry/proof/lease mutation until every child passes.
         let projected = readNestedRegistry(route);
-        const seen = new Set(projected.processedEvents);
+        const seen = new Set(nestedRegistryNeedsReplay(projected) ? [] : projected.processedEvents);
         const eventFiles = fs.readdirSync(route.eventSink).filter(name => /\.jsonl?$/.test(name)).sort();
         if (eventFiles.length > 10000) return blocked("INVALID_METADATA", "The explicit recovery event set exceeds its bound.");
         for (const name of eventFiles) {

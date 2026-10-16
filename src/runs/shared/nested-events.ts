@@ -706,6 +706,11 @@ export function findNestedRunById(id: string): { rootRunId: string; run: NestedR
 	return match ? { rootRunId: match.rootRunId, run: match.run } : undefined;
 }
 
+/** Older registries dropped children while marking their events processed. */
+export function nestedRegistryNeedsReplay(registry: NestedRegistry): boolean {
+	return registry.schemaVersion !== REGISTRY_SCHEMA_VERSION;
+}
+
 export function readNestedRegistry(route: NestedRoute): NestedRegistry {
 	validateRouteShape(route);
 	try {
@@ -727,7 +732,7 @@ export function projectNestedEvents(route: NestedRoute): NestedRegistry {
 	validateRouteShape(route);
 	let registry = readNestedRegistry(route);
 	const seen = new Set(registry.processedEvents);
-	const replayProcessed = registry.schemaVersion !== REGISTRY_SCHEMA_VERSION;
+	const replayProcessed = nestedRegistryNeedsReplay(registry);
 	let changed = replayProcessed;
 	let entries: string[] = [];
 	try {
