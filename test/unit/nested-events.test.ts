@@ -478,6 +478,49 @@ describe("nested event parsing and projection", () => {
 	});
 });
 
+describe("nested registry completeness", () => {
+	it("keeps every root child in the registry, not only the first sixteen", () => {
+		const route = trackRoute();
+		for (let index = 0; index < 20; index++) {
+			writeNestedEvent(route, {
+				type: "subagent.nested.completed",
+				ts: index + 1,
+				parentRunId: "root-run",
+				parentStepIndex: 1,
+				child: child(`nested-${index}`, "complete", index + 1),
+			});
+		}
+
+		const registry = projectNestedEvents(route);
+		assert.equal(registry.children.length, 20);
+		assert.equal(registry.children.at(-1)?.id, "nested-19");
+	});
+
+	it("restores children that an older registry dropped after their events were marked processed", () => {
+		const route = trackRoute();
+		for (let index = 0; index < 17; index++) {
+			writeNestedEvent(route, {
+				type: "subagent.nested.completed",
+				ts: index + 1,
+				parentRunId: "root-run",
+				parentStepIndex: 1,
+				child: child(`nested-${index}`, "complete", index + 1),
+			});
+		}
+		projectNestedEvents(route);
+		const registryFile = path.join(path.dirname(route.eventSink), "registry.json");
+		const stored = JSON.parse(fs.readFileSync(registryFile, "utf-8")) as { children: Array<{ id: string }>; schemaVersion?: number };
+		const legacy = { ...stored, children: stored.children.filter((item) => item.id !== "nested-16") };
+		delete legacy.schemaVersion;
+		fs.writeFileSync(registryFile, JSON.stringify(legacy));
+
+		const restored = projectNestedEvents(route);
+		assert.equal(restored.children.length, 17);
+		assert.equal(restored.children.find((item) => item.id === "nested-16")?.state, "complete");
+		assert.deepEqual(projectNestedEvents(route), restored);
+	});
+});
+
 describe("nested session-name projection", () => {
 	it("keeps bounded root and step session names from async status", () => {
 		const summary = nestedSummaryFromAsyncStatus({
