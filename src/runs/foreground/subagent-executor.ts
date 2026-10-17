@@ -68,7 +68,7 @@ import { SUBAGENT_ASYNC_COMPLETE_EVENT } from "../../shared/types.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
 import { formatControlIntercomMessage, formatControlNoticeMessage, resolveControlConfig, shouldNotifyControlEvent } from "../shared/subagent-control.ts";
 import { formatSpawnBudget, getSpawnBudgetSnapshot, grantSpawnBudget, preflightSpawnBudget, preflightSpawnBudgetGrant, reserveSpawnBudget } from "../shared/spawn-budget.ts";
-import { claimRunFanoutBatch, claimRunFanoutBatchWithCommit, createRunFanoutBudget, formatRunFanoutBudget, getRunFanoutBudgetSnapshot, readRunFanoutBudgetDescriptor, RunFanoutLimitError, writeRunFanoutBudgetDescriptor } from "../shared/run-fanout-budget.ts";
+import { claimRunFanoutBatch, claimRunFanoutBatchWithCommit, createRunFanoutBudget, formatRunFanoutBudget, getRunFanoutBudgetSnapshot, readRunFanoutBudgetDescriptor, resolveRevivalRunFanoutBudget, RunFanoutLimitError, writeRunFanoutBudgetDescriptor } from "../shared/run-fanout-budget.ts";
 import { retainLiveForegroundNestedRoute } from "../../integrations/pi-web-session-liveness.ts";
 import { HERDR_FOREGROUND_CONTROL_CHANGED_EVENT } from "../../integrations/herdr-status.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
@@ -2375,7 +2375,7 @@ async function resumeAsyncRun(input: {
 		// Recovery descriptors, remembered foreground runs, and current workflow roots
 		// preserve parent authority before the selected agent's descendant ceiling.
 		capabilityCeiling: intersectSubagentCapabilityCeilings(recoveryDescriptor?.capabilityCeiling ?? (target.source === "foreground" || (target.source === "async" && target.mode === "workflow") ? target.capabilityCeiling : undefined), resolveCurrentSubagentCapabilityCeiling(input.deps.state.currentSessionId)),
-		runFanoutBudget: input.params.runFanoutBudget ?? recoveryDescriptor?.runFanoutBudget ?? createRunFanoutBudget(runId, resolveMaxSubagentSpawnsPerRun(input.deps.config.maxSubagentSpawnsPerRun)),
+		runFanoutBudget: resolveRevivalRunFanoutBudget({ requested: input.params.runFanoutBudget, inherited: inheritedRunFanoutBudget(input.deps), recovered: recoveryDescriptor?.runFanoutBudget, runId, limit: resolveMaxSubagentSpawnsPerRun(input.deps.config.maxSubagentSpawnsPerRun) }),
 		parentWorkflowRunId: input.params.workflowParentRunId,
 		workflowKey: input.params.workflowKey,
 		activeAsyncCapacity,

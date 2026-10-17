@@ -9,6 +9,7 @@ import {
 	claimRunFanoutBatchWithCommit,
 	createRunFanoutBudget,
 	getRunFanoutBudgetSnapshot,
+	resolveRevivalRunFanoutBudget,
 	RunFanoutLimitError,
 	validateRunFanoutBudgetDescriptor,
 } from "../../src/runs/shared/run-fanout-budget.ts";
@@ -184,5 +185,25 @@ describe("run fan-out budget", () => {
 		fs.symlinkSync(outside, linked, process.platform === "win32" ? "junction" : "dir");
 		directories.push(linked);
 		assert.throws(() => validateRunFanoutBudgetDescriptor({ ...descriptor, directory: linked }), /resolves outside/);
+	});
+});
+
+describe("revived run fan-out budget", () => {
+	it("charges a child revived by a nested caller to the caller's budget, not the source run's", () => {
+		const caller = { ...createRunFanoutBudget("caller-workflow", 256), parentPath: "workflow[owner-f002]" };
+		const source = { ...createRunFanoutBudget("source-workflow", 256), parentPath: "workflow[restart-f002]/old-manager" };
+		const revived = resolveRevivalRunFanoutBudget({ inherited: caller, recovered: source, runId: "revived-child", limit: 64 });
+		assert.equal(revived.rootRunId, caller.rootRunId);
+		assert.equal(revived.directory, caller.directory);
+		assert.equal(revived.limit, caller.limit);
+		assert.equal(revived.parentPath, "workflow[owner-f002]/revived-child");
+	});
+
+	it("keeps the recorded budget for a top-level revival and honors an explicit budget", () => {
+		const source = createRunFanoutBudget("source-run", 64);
+		assert.deepEqual(resolveRevivalRunFanoutBudget({ recovered: source, runId: "revived", limit: 64 }), source);
+		const requested = createRunFanoutBudget("workflow-run", 256);
+		assert.deepEqual(resolveRevivalRunFanoutBudget({ requested, inherited: source, recovered: source, runId: "revived", limit: 64 }), requested);
+		assert.equal(resolveRevivalRunFanoutBudget({ runId: "fresh-root", limit: 32 }).limit, 32);
 	});
 });

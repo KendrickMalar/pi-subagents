@@ -89,6 +89,15 @@ export function createRunFanoutBudget(rootRunId: string, limit: number): RunFano
 	return { version: 1, rootRunId, directory, limit };
 }
 
+// A revived child is a new run under whoever revives it. Inside a nested caller it must share the
+// caller's budget, as a fresh launch would; reusing the source run's budget leaves the child under the
+// new parent with the old parent's budget, which nested recovery then refuses.
+export function resolveRevivalRunFanoutBudget(input: { requested?: RunFanoutBudgetDescriptor; inherited?: RunFanoutBudgetDescriptor; recovered?: RunFanoutBudgetDescriptor; runId: string; limit: number }): RunFanoutBudgetDescriptor {
+	if (input.requested) return input.requested;
+	if (input.inherited) return { ...input.inherited, parentPath: `${input.inherited.parentPath ? `${input.inherited.parentPath}/` : ""}${input.runId}` };
+	return input.recovered ?? createRunFanoutBudget(input.runId, input.limit);
+}
+
 export function validateRunFanoutBudgetDescriptor(value: unknown): RunFanoutBudgetDescriptor {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Run fan-out budget descriptor is missing or invalid.");
 	const descriptor = value as Partial<RunFanoutBudgetDescriptor>;
