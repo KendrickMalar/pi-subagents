@@ -389,6 +389,28 @@ describe("workflow launch params", () => {
 		);
 	});
 
+	it("does not hand the workflow aggregate output to a retained child as its own output", () => {
+		const params = prepareWorkflowLaunchParams(
+			{ output: "/epic/.task-artifacts/workflow-result.md", outputMode: "file-only" },
+			{ resume: "retained-run", task: "Continue" },
+			"workflow-run",
+			"continue",
+			{ outputClaimPath: "/feature/.task-artifacts/retained-run-output.md" },
+		);
+		assert.equal(Object.hasOwn(params, "output"), false);
+		assert.equal(params.workflowOutputClaimPath, "/feature/.task-artifacts/retained-run-output.md");
+	});
+
+	it("keeps an explicit output on a retained workflow child", () => {
+		const params = prepareWorkflowLaunchParams(
+			{ output: "/epic/.task-artifacts/workflow-result.md" },
+			{ resume: "retained-run", task: "Continue", output: "/feature/explicit.md" },
+			"workflow-run",
+			"continue",
+		);
+		assert.equal(params.output, "/feature/explicit.md");
+	});
+
 	it("preserves worktree isolation for retained workflow children", () => {
 		assert.deepEqual(
 			prepareWorkflowLaunchParams(
