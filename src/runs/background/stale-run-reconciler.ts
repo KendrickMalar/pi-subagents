@@ -15,6 +15,17 @@ import { currentPidNamespaceScope } from "./pid-namespace.ts";
 
 export type PidLiveness = "alive" | "dead" | "unknown";
 
+const DEFAULT_STALE_ALIVE_PID_MS = 24 * 60 * 60 * 1000;
+
+/** How long a live-looking runner may go without a status update before reconciliation fails the run.
+ * PI_SUBAGENTS_STALE_ALIVE_PID_MS (a positive integer of milliseconds) shortens or lengthens it; anything else keeps 24h. */
+export function defaultStaleAlivePidMs(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.PI_SUBAGENTS_STALE_ALIVE_PID_MS;
+	if (raw === undefined || !/^[1-9][0-9]*$/.test(raw)) return DEFAULT_STALE_ALIVE_PID_MS;
+	const value = Number(raw);
+	return Number.isSafeInteger(value) ? value : DEFAULT_STALE_ALIVE_PID_MS;
+}
+
 type KillFn = (pid: number, signal?: NodeJS.Signals | 0) => boolean;
 
 interface StartedRunMetadata {
@@ -451,7 +462,7 @@ export function reconcileAsyncRun(asyncDir: string, options: ReconcileAsyncRunOp
 	const observedLiveness = checkPidLiveness(effectiveStatus.pid, options.kill, pidScopeVerified);
 	const liveness = observedLiveness === "dead" && pidScopeMismatch ? "unknown" : observedLiveness;
 	if (liveness !== "dead") {
-		const staleAfterMs = options.staleAlivePidMs ?? 24 * 60 * 60 * 1000;
+		const staleAfterMs = options.staleAlivePidMs ?? defaultStaleAlivePidMs();
 		const lastUpdate = effectiveStatus.lastUpdate ?? effectiveStatus.startedAt;
 		if (now - lastUpdate <= staleAfterMs) return { status: status ?? null, repaired: false, resultPath };
 		const probe = liveness === "alive" ? "is still live" : "cannot be probed from this process";

@@ -74,6 +74,9 @@ export interface ChildRuntimeConfig {
 	/** Route the child reports nested runs on; set only for fanout-authorized children. */
 	nestedRoute?: ChildNestedRoute;
 	nestedParent?: ChildNestedParent;
+	/** Verified former manager subtree, granted only by the original parent's recover operation. Not inherited by grandchildren. */
+	recoveredNestedParentRunId?: string;
+	recoveredNestedSessions?: import("./recovered-nested-session.ts").RecoveredNestedSession[];
 	runFanoutBudget?: RunFanoutBudgetDescriptor;
 	/** Nesting depth of this child (1 for a top-level parent's child). */
 	depth: number;
@@ -81,6 +84,8 @@ export interface ChildRuntimeConfig {
 	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 	/** Immutable root-parent host policy propagated to nested native launches. */
 	requiredExtensions?: RequiredChildExtensionSnapshot;
+	/** Fixed, parent-owned native definitions; the receiving ceiling still applies. */
+	runtimeAgentSnapshot?: import("../../agents/runtime-agent-snapshot.ts").RuntimeAgentSnapshot;
 	thinkingCeiling?: ThinkingLevel;
 	inheritProjectContext?: boolean;
 	inheritGlobalContext?: boolean;

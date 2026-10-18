@@ -161,6 +161,7 @@ const SubagentParamProperties = {
 	action: Type.Optional(Type.String({ minLength: 1,
 		description: "Management/control only; omit for execution. validate accepts workflow: true or a script path. Discover actions with guide topic tool-reference."
 	})),
+	nestedRootRunId: Type.Optional(Type.String()),
 	capabilities: Type.Optional(Type.Boolean({ description: "list: compact capability rows/details without system prompts." })),
 	name: Type.Optional(Type.String({ description: "schedule.create name." })),
 	id: Type.Optional(Type.String({
@@ -179,6 +180,7 @@ const SubagentParamProperties = {
 	merge: Type.Optional(Type.Unsafe({ type: "object", additionalProperties: true, description: "lane.recordMerge evidence; read guide tool-reference." })),
 	supersession: Type.Optional(Type.Unsafe({ type: "object", additionalProperties: true, description: "lane.recordSupersession evidence; read guide tool-reference." })),
 	index: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based child/transcript index." })),
+	takeOver: Type.Optional(Type.Boolean({ description: "resume: adopt a finished run of another session." })),
 	childId: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: "Child-scoped stop identity." })),
 	toolCallId: Type.Optional(Type.String({ description: "Command tool-call id." })),
 	view: Type.Optional(Type.String({

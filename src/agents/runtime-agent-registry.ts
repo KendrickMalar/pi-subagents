@@ -67,6 +67,7 @@ export interface RuntimeAgentRegistration {
 interface RuntimeAgentRecord {
 	pi: ExtensionAPI;
 	agent: AgentConfig;
+	definition: RuntimeAgentDefinition;
 }
 
 interface RuntimeAgentRegistry {
@@ -392,7 +393,7 @@ export function registerRuntimeAgent(input: RegisterRuntimeAgentInput): RuntimeA
 	const records = current.byPi.get(pi) ?? [];
 	if (records.length >= MAX_RUNTIME_AGENTS_PER_PI) throw new Error(`Runtime agent registry supports at most ${MAX_RUNTIME_AGENTS_PER_PI} agents per Pi runtime.`);
 	assertNoRuntimeCollision(agent, records.map((record) => record.agent));
-	const record: RuntimeAgentRecord = { pi, agent };
+	const record: RuntimeAgentRecord = { pi, agent, definition };
 	records.push(record);
 	current.byPi.set(pi, records);
 	let disposed = false;
@@ -416,6 +417,13 @@ export function clearRuntimeAgentsForPi(pi: RuntimeAgentOwner): void {
 export function listRuntimeAgentConfigs(pi: RuntimeAgentOwner): AgentConfig[] {
 	return (registry().byPi.get(pi) ?? []).map((record) => ({ ...record.agent, aliases: record.agent.aliases ? [...record.agent.aliases] : undefined }));
 }
+
+/** Definitions belong to this owner, never a process-wide or configured catalog. */
+export function listRuntimeAgentDefinitions(pi: RuntimeAgentOwner): Array<{name: string; definition: RuntimeAgentDefinition}> {
+	return (registry().byPi.get(pi) ?? []).map(record => ({name: record.agent.name, definition: structuredClone(record.definition)}));
+}
+
+export {validateDefinition as validateRuntimeAgentDefinition};
 
 function assertNoConfiguredCollision(configuredAgents: readonly AgentConfig[], runtimeAgents: readonly AgentConfig[]): void {
 	const configured = new Map<string, string>();

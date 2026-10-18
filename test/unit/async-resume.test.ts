@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { applySteeringRecoveryAgentConfig, asyncReviveRequiresRecoveryDescriptor, buildRevivedAsyncTask, resolveAsyncResumeTarget } from "../../src/runs/background/async-resume.ts";
+import { applySteeringRecoveryAgentConfig, asyncReviveRequiresRecoveryDescriptor, buildRevivedAsyncTask, recordAsyncRunOwnerTransfer, resolveAsyncResumeTarget } from "../../src/runs/background/async-resume.ts";
 import type { AgentConfig } from "../../src/agents/agents.ts";
 import { createRunFanoutBudget } from "../../src/runs/shared/run-fanout-budget.ts";
 
@@ -831,6 +831,69 @@ describe("async resume lookup", () => {
 			assert.equal(target.kind, "live");
 			assert.equal(target.model, "openai/gpt-4.1");
 			assert.equal(target.thinking, "off");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("lets an explicit takeOver resume a finished run owned by another session and records the transfer", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-takeover-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "child.jsonl");
+			fs.writeFileSync(sessionFile, "{}\n", "utf-8");
+			writeJson(path.join(asyncRoot, "orphan", "status.json"), {
+				runId: "orphan",
+				sessionId: "session-old",
+				mode: "single",
+				state: "failed",
+				startedAt: 100,
+				sessionFile,
+				steps: [{ agent: "worker", status: "failed", sessionFile }],
+			});
+			const deps = { asyncDirRoot: asyncRoot, resultsDir };
+
+			assert.throws(() => resolveAsyncResumeTarget({ id: "orphan" }, deps, { sessionId: "session-new" }), /not found in the active session/);
+			assert.throws(() => resolveAsyncResumeTarget({ id: "orphan" }, deps, { sessionId: "session-new", takeOver: false }), /not found in the active session/);
+
+			const target = resolveAsyncResumeTarget({ id: "orphan" }, deps, { sessionId: "session-new", takeOver: true });
+			assert.equal(target.kind, "revive");
+			assert.deepEqual(target.ownerTransfer, { fromSessionId: "session-old", toSessionId: "session-new" });
+			const unchanged = JSON.parse(fs.readFileSync(path.join(asyncRoot, "orphan", "status.json"), "utf-8"));
+			assert.equal(unchanged.sessionId, "session-old", "resolving must not write");
+
+			recordAsyncRunOwnerTransfer(target.asyncDir!, { fromSessionId: "session-old", toSessionId: "session-new", at: 5000 });
+			const moved = JSON.parse(fs.readFileSync(path.join(asyncRoot, "orphan", "status.json"), "utf-8"));
+			assert.equal(moved.sessionId, "session-new");
+			assert.deepEqual(moved.ownerTransfers, [{ from: "session-old", to: "session-new", at: 5000 }]);
+			assert.equal(moved.state, "failed");
+
+			const again = resolveAsyncResumeTarget({ id: "orphan" }, deps, { sessionId: "session-new" });
+			assert.equal(again.ownerTransfer, undefined);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("never lets takeOver claim a run that is still running", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-takeover-live-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			writeJson(path.join(asyncRoot, "busy", "status.json"), {
+				runId: "busy",
+				sessionId: "session-old",
+				mode: "single",
+				state: "running",
+				pid: process.pid,
+				startedAt: Date.now(),
+				lastUpdate: Date.now(),
+				steps: [{ agent: "worker", status: "running" }],
+			});
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "busy" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }, { sessionId: "session-new", takeOver: true }),
+				/still running in another session/,
+			);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

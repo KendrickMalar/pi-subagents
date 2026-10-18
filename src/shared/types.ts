@@ -831,6 +831,7 @@ export interface SteeringRecoveryDescriptor {
 	launchContractDigest?: string;
 	extensionBindings?: ExtensionBindings;
 	requiredExtensions?: RequiredChildExtensionSnapshot;
+	runtimeAgentSnapshot?: import("../agents/runtime-agent-snapshot.ts").RuntimeAgentSnapshot;
 	runFanoutBudget: RunFanoutBudgetDescriptor;
 	sourceRunId: string;
 	agentContract?: AgentContract;
@@ -1442,6 +1443,7 @@ export interface AgentCapabilityRow {
 }
 
 export interface Details {
+	recovery?: import("../runs/background/nested-recovery.ts").NestedRecoveryResult;
 	commands?: import("../runs/shared/child-commands.ts").ChildCommandSnapshot[];
 	mode: SubagentResultMode | "management";
 	workflowReceiptPath?: string;
@@ -2173,6 +2175,7 @@ export interface ForegroundResumeChild {
 	/** Private bounded launch fields needed to preserve the child contract on resume. */
 	resumeContract?: {
 		modelResponseAliases?: Record<string, string[]>;
+		runtimeAgentSnapshot?: import("../agents/runtime-agent-snapshot.ts").RuntimeAgentSnapshot;
 		outputSchema?: JsonSchemaObject | false;
 		agentContract?: AgentContract;
 		acceptance?: AcceptanceInput;
@@ -2481,6 +2484,9 @@ export interface RunSyncOptions {
 	projectTrusted?: boolean;
 	/** The launching executor's own child runtime when it is itself an in-process child. */
 	childRuntime?: import("../runs/shared/child-runtime-config.ts").ChildRuntimeConfig;
+	/** The invoking owner is in-process only; never serialized to a runner. */
+	runtimeAgentOwner?: import("@earendil-works/pi-coding-agent").ExtensionAPI;
+	runtimeAgentSnapshot?: import("../agents/runtime-agent-snapshot.ts").RuntimeAgentSnapshot;
 	/** Fires once the child session exists and can be steered. */
 	onChildSession?: (controls: ForegroundChildSessionControls) => void;
 	/** Opt-in global permission rules; missing tools remain allowed. */
@@ -2889,7 +2895,7 @@ export const POLL_INTERVAL_MS = 250;
 export const WIDGET_ANIMATION_INTERVAL_MS = 1000;
 export const MAX_WIDGET_JOBS = 4;
 export const DEFAULT_SUBAGENT_MAX_DEPTH = 2;
-export const SUBAGENT_ACTIONS = ["list", "get", "models", "children.list", "guide", "validate", "create", "update", "delete", "eject", "disable", "enable", "reset", "mission.create", "mission.list", "mission.show", "mission.update", "mission.resolve-decision", "mission.attach-run", "mission.close", "worktree.discard", "worktree.cleanup", "lane.status", "lane.recordMerge", "lane.recordSupersession", "refine", "refine.show", "refine.rollback", "inspector.open", "inspector.command", "inspector.status", "inspector.close", "project.open", "project.status", "project.close", "status", "debug.run", "grant-spawn-budget", "interrupt", "resume", "steer", "stop", "command.status", "command.yield", "command.cancel", "dismiss", "doctor", "watchdog.status", "watchdog.check", "watchdog.configure", "watchdog.recommend-model", "schedule.create", "schedule.list", "schedule.show", "schedule.history", "schedule.pause", "schedule.resume", "schedule.run", "schedule.run-due", "schedule.delete"] as const;
+export const SUBAGENT_ACTIONS = ["recover", "list", "get", "models", "children.list", "guide", "validate", "create", "update", "delete", "eject", "disable", "enable", "reset", "mission.create", "mission.list", "mission.show", "mission.update", "mission.resolve-decision", "mission.attach-run", "mission.close", "worktree.discard", "worktree.cleanup", "lane.status", "lane.recordMerge", "lane.recordSupersession", "refine", "refine.show", "refine.rollback", "inspector.open", "inspector.command", "inspector.status", "inspector.close", "project.open", "project.status", "project.close", "status", "debug.run", "grant-spawn-budget", "interrupt", "resume", "steer", "stop", "command.status", "command.yield", "command.cancel", "dismiss", "doctor", "watchdog.status", "watchdog.check", "watchdog.configure", "watchdog.recommend-model", "schedule.create", "schedule.list", "schedule.show", "schedule.history", "schedule.pause", "schedule.resume", "schedule.run", "schedule.run-due", "schedule.delete"] as const;
 
 export const DEFAULT_FORK_PREAMBLE =
 	"You are a delegated subagent running from a fork of the parent session. " +

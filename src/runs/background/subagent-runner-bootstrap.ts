@@ -5,6 +5,7 @@ import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { acquireSessionLease } from "../shared/session-lease.ts";
 import { readProcessTerminalCandidate, writeProcessTerminalCandidate, markProcessTerminalCandidateLeaseRelease } from "./process-terminal-candidate.ts";
 import { persistRunnerStartupFailure } from "./runner-startup-failure.ts";
+import { waitForRunnerClosures } from "./runner-closures.ts";
 import { currentPidNamespaceScope } from "./pid-namespace.ts";
 import type { DefaultChildSessionFactoryOptions } from "../shared/child-session.ts";
 import type { SubagentRunConfig } from "./subagent-runner.ts";
@@ -218,12 +219,15 @@ export async function runConfiguredSubagent(rawConfig: unknown, options: RunnerB
 	}
 }
 
+// Long enough for children aborted with this run to close; a child that keeps running is not waited for.
+const CHILD_RUNNER_CLOSE_WAIT_MS = 30_000;
+
 function startConfiguredSubagent(config: unknown): void {
 	runConfiguredSubagent(config).then(
-		() => process.exit(0),
+		() => waitForRunnerClosures(CHILD_RUNNER_CLOSE_WAIT_MS).then(() => process.exit(0)),
 		(error) => {
 			console.error("Subagent runner error:", error);
-			process.exit(1);
+			return waitForRunnerClosures(CHILD_RUNNER_CLOSE_WAIT_MS).then(() => process.exit(1));
 		},
 	);
 }

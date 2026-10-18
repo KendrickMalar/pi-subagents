@@ -15,6 +15,8 @@ export interface RunnerChildLaunchContext {
 	childIntercomTarget?: string;
 	orchestratorIntercomTarget?: string;
 	nestedRoute?: BuildInProcessChildLaunchInput["nestedRoute"];
+	recoveredNestedParentRunId?: BuildInProcessChildLaunchInput["recoveredNestedParentRunId"];
+	recoveredNestedSessions?: import("../shared/recovered-nested-session.ts").RecoveredNestedSession[];
 	runFanoutBudget?: BuildInProcessChildLaunchInput["runFanoutBudget"];
 	capabilityCeiling?: BuildInProcessChildLaunchInput["capabilityCeiling"];
 	inheritedChildRuntime?: InheritedChildRuntime;
@@ -55,6 +57,7 @@ export function buildRunnerChildLaunch(step: RunnerSubagentStep, ctx: RunnerChil
 		extensions: step.extensions,
 		subagentOnlyExtensions: step.subagentOnlyExtensions,
 		requiredExtensions: step.requiredExtensions,
+		runtimeAgentSnapshot: step.runtimeAgentSnapshot,
 		fast: step.fast,
 		systemPrompt: acceptancePrompt ? `${step.systemPrompt ?? ""}\n${acceptancePrompt}` : step.systemPrompt ?? "",
 		systemPromptMode: step.systemPromptMode,
@@ -71,6 +74,8 @@ export function buildRunnerChildLaunch(step: RunnerSubagentStep, ctx: RunnerChil
 		childAgentName: step.agent,
 		childIndex: ctx.flatIndex,
 		nestedRoute: ctx.nestedRoute,
+		recoveredNestedParentRunId: ctx.recoveredNestedParentRunId,
+		recoveredNestedSessions: ctx.recoveredNestedSessions,
 		runFanoutBudget: ctx.runFanoutBudget ? {
 			...ctx.runFanoutBudget,
 			...(step.runFanoutPath ? { parentPath: `${ctx.runFanoutBudget.parentPath ? `${ctx.runFanoutBudget.parentPath}/` : ""}${step.runFanoutPath}` } : {}),

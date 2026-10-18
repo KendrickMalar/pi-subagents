@@ -207,6 +207,8 @@ export interface SubagentRunConfig {
 	dynamicFanoutMaxItems?: number;
 	workflowGraph?: WorkflowGraphSnapshot;
 	nestedRoute?: NestedRouteInfo;
+	recoveredNestedParentRunId?: string;
+	recoveredNestedSessions?: import("../shared/recovered-nested-session.ts").RecoveredNestedSession[];
 	nestedSelf?: { parentRunId: string; parentStepIndex?: number; depth: number; path?: Array<{ runId: string; stepIndex?: number; agent?: string }> };
 	timeoutMs?: number;
 	deadlineAt?: number;
@@ -695,6 +697,8 @@ interface SingleStepContext {
 	childIntercomTarget?: string;
 	orchestratorIntercomTarget?: string;
 	nestedRoute?: NestedRouteInfo;
+	recoveredNestedParentRunId?: string;
+	recoveredNestedSessions?: import("../shared/recovered-nested-session.ts").RecoveredNestedSession[];
 	capabilityCeiling?: ResolvedSubagentCapabilityCeiling;
 	runFanoutBudget?: RunFanoutBudgetDescriptor;
 	onAttemptStart?: (attempt: { model?: string; thinking?: string; contextLimit?: number }) => void;
@@ -3755,6 +3759,8 @@ export async function runSubagent(
 					childIntercomTarget: config.childIntercomTargets?.[fi],
 					orchestratorIntercomTarget: config.controlIntercomTarget,
 					nestedRoute: config.nestedRoute,
+					recoveredNestedParentRunId: config.recoveredNestedParentRunId,
+					recoveredNestedSessions: config.recoveredNestedSessions,
 					capabilityCeiling: config.capabilityCeiling,
 					runFanoutBudget: config.runFanoutBudget,
 					registerInterrupt: (interrupt) => registerStepInterrupt(fi, interrupt),
@@ -4171,6 +4177,8 @@ export async function runSubagent(
 							childIntercomTarget: config.childIntercomTargets?.[fi],
 							orchestratorIntercomTarget: config.controlIntercomTarget,
 							nestedRoute: config.nestedRoute,
+							recoveredNestedParentRunId: config.recoveredNestedParentRunId,
+							recoveredNestedSessions: config.recoveredNestedSessions,
 							capabilityCeiling: config.capabilityCeiling,
 							runFanoutBudget: config.runFanoutBudget,
 							registerInterrupt: (interrupt) => registerStepInterrupt(fi, interrupt),
@@ -4563,6 +4571,8 @@ export async function runSubagent(
 				childIntercomTarget: config.childIntercomTargets?.[flatIndex],
 				orchestratorIntercomTarget: config.controlIntercomTarget,
 				nestedRoute: config.nestedRoute,
+				recoveredNestedParentRunId: config.recoveredNestedParentRunId,
+				recoveredNestedSessions: config.recoveredNestedSessions,
 				capabilityCeiling: config.capabilityCeiling,
 				runFanoutBudget: config.runFanoutBudget,
 				registerInterrupt: (interrupt) => registerStepInterrupt(flatIndex, interrupt),

@@ -48,6 +48,7 @@
   "files": [
     "index.ts",
     "src/**/*.ts",
+    "scripts/reconcile-stale-runs.ts",
     "*.mjs",
     "agents/",
     "skills/**/*",

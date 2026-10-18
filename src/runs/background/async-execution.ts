@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import * as nodeModule from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, formatUnknownAgentError, readModelRoleContext, unknownAgentDiagnosticContext, type AgentConfig, type UnknownAgentDiagnosticContext } from "../../agents/agents.ts";
+import {prepareRuntimeAgentSnapshot, type RuntimeAgentSnapshot} from "../../agents/runtime-agent-snapshot.ts";
 import { createAtomicJsonWriter, writePrivateAtomicJson } from "../../shared/atomic-json.ts";
 import { childCacheRetentionEnv } from "../../shared/child-cache-retention.ts";
 import { buildEffectiveSystemPrompt } from "../shared/effective-system-prompt.ts";
@@ -79,6 +80,7 @@ import { usageBudgetState } from "../shared/usage-budget.ts";
 import type { ImportedAsyncRoot } from "./chain-root-attachment.ts";
 import type { SessionLeaseRequest } from "../shared/session-lease.ts";
 import { finalizeProcessTerminal, initializeProcessTerminal, readProcessTerminal } from "./process-terminal.ts";
+import { trackRunnerClosure } from "./runner-closures.ts";
 import { persistRunnerStartupFailure } from "./runner-startup-failure.ts";
 import type { ActiveAsyncCapacityHandle } from "./active-async-capacity.ts";
 import { statusStepDescription } from "./chain-append.ts";
@@ -271,6 +273,8 @@ interface AsyncSingleParams {
 	/** Agent contract before per-run bridge injection, used only for recovery persistence. */
 	recoveryAgentConfig?: AgentConfig;
 	requiredExtensions?: RequiredChildExtensionSnapshot;
+	/** A revival retains even an empty snapshot rather than reading the current owner. */
+	runtimeAgentSnapshot?: RuntimeAgentSnapshot;
 	ctx: AsyncExecutionContext;
 	cwd?: string;
 	requestedCwd?: string;
@@ -317,6 +321,9 @@ interface AsyncSingleParams {
 	controlIntercomTarget?: string;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	nestedRoute?: NestedRouteInfo;
+	/** Host-verified recovery admission; not a model-facing launch option. */
+	recoveredNestedParentRunId?: string;
+	recoveredNestedSessions?: import("../shared/recovered-nested-session.ts").RecoveredNestedSession[];
 	acceptance?: AcceptanceInput;
 	timeoutMs?: number;
 	absoluteDeadlineAt?: number;
@@ -801,8 +808,11 @@ function spawnRunner(cfg: object, suffix: string, cwd: string, initialStatus: Om
 		});
 		closeFd(stdoutFd);
 		closeFd(stderrFd);
+		let closureFinalized!: () => void;
+		trackRunnerClosure(new Promise<void>((resolve) => { closureFinalized = resolve; }));
 		proc.on("error", (error) => {
 			console.error(`[pi-subagents] async spawn failed: ${error.message}`);
+			if (typeof proc.pid !== "number") closureFinalized();
 		});
 		proc.once("close", (exitCode, signal) => {
 			const finalize = () => {
@@ -865,8 +875,15 @@ function spawnRunner(cfg: object, suffix: string, cwd: string, initialStatus: Om
 			}
 			onProcessTerminal?.(persisted);
 			};
-			if (startupPath) setImmediate(finalize);
-			else finalize();
+			const settle = () => {
+				try {
+					finalize();
+				} finally {
+					closureFinalized();
+				}
+			};
+			if (startupPath) setImmediate(settle);
+			else settle();
 		});
 		if (typeof proc.pid !== "number") {
 			return { error: `async runner did not produce a pid for cwd: ${cwd}` };
@@ -1250,6 +1267,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			runtimeSnapshotHost: ctx.pi,
 		});
 		const launchResolvedExtensions = externalRunner ? undefined : projectLaunchResolvedChildExtensions(toolPlan);
+		const runtimeAgentSnapshot = externalRunner || machine ? undefined : prepareRuntimeAgentSnapshot(ctx.pi, a, toolPlan.capabilityCeiling);
 		if (externalRunner && permissionRules) {
 			throw new AsyncStartValidationError(`Agent '${a.name}' uses runner.type='${externalRunnerType}', which cannot enforce native Pi child permission rules.`);
 		}
@@ -1289,6 +1307,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			extensions: a.extensions,
 			subagentOnlyExtensions: a.subagentOnlyExtensions,
 			...(!externalRunner ? { requiredExtensions } : {}),
+			...(runtimeAgentSnapshot ? {runtimeAgentSnapshot} : {}),
 			mcpDirectTools: a.mcpDirectTools,
 			...(toolPlan.builtinMcpTools ? { builtinMcpTools: toolPlan.builtinMcpTools } : {}),
 			mutationTools: a.mutationTools,
@@ -2097,6 +2116,7 @@ export function executeAsyncSingle(
 		runtimeSnapshotHost: ctx.pi,
 	});
 	const launchResolvedExtensions = externalRunner ? undefined : projectLaunchResolvedChildExtensions(toolPlan);
+	const runtimeAgentSnapshot = externalRunner || machine ? undefined : prepareRuntimeAgentSnapshot(ctx.pi, agentConfig, toolPlan.capabilityCeiling, params.runtimeAgentSnapshot);
 	const fast = params.fast ?? agentConfig.fast;
 	const launchThinking = resolveEffectiveThinking(selectedModel, effectiveThinking);
 	const { definitionDigest, launchContractDigest } = resolveLaunchBinding({
@@ -2130,6 +2150,7 @@ export function executeAsyncSingle(
 		launchContractDigest,
 		...(extensionBindings ? { extensionBindings } : {}),
 		...(requiredExtensions.length > 0 ? { requiredExtensions } : {}),
+		...(runtimeAgentSnapshot ? {runtimeAgentSnapshot} : {}),
 		runFanoutBudget,
 		sourceRunId: id,
 		...(params.agentContract ? { agentContract: params.agentContract } : {}),
@@ -2229,6 +2250,7 @@ export function executeAsyncSingle(
 						extensions: agentConfig.extensions,
 						subagentOnlyExtensions: agentConfig.subagentOnlyExtensions,
 						...(!externalRunner ? { requiredExtensions } : {}),
+						...(runtimeAgentSnapshot ? {runtimeAgentSnapshot} : {}),
 						mcpDirectTools: agentConfig.mcpDirectTools,
 						...(toolPlan.builtinMcpTools ? { builtinMcpTools: toolPlan.builtinMcpTools } : {}),
 						mutationTools: agentConfig.mutationTools,
@@ -2302,6 +2324,8 @@ export function executeAsyncSingle(
 				...(lane ? { lane } : {}),
 				...(params.revivalLease ? { revivalLease: params.revivalLease } : {}),
 				nestedRoute: nestedRoute ?? inheritedNestedRoute,
+				recoveredNestedParentRunId: params.recoveredNestedParentRunId,
+				recoveredNestedSessions: params.recoveredNestedSessions,
 				...(launcher ? { launcher } : {}),
 				nestedSelf: inheritedNestedRoute && nestedAddress ? {
 					parentRunId: nestedAddress.parentRunId,

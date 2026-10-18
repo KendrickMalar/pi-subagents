@@ -5,6 +5,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isRoleReference } from "../../shared/model-roles.ts";
 import { discoverAgents, discoverAgentsAll, readModelRoleContext, findBlockingAgentDiagnostic, formatUnknownAgentError, resolveAgentName, unknownAgentDiagnosticContext, type AgentConfig, type AgentDiscoveryDiagnostic, type AgentScope, type UnknownAgentDiagnosticContext } from "../../agents/agents.ts";
+import {prepareRuntimeAgentSnapshot, type RuntimeAgentSnapshot} from "../../agents/runtime-agent-snapshot.ts";
 import { getArtifactsDir, getProjectArtifactPackagingWarning, getProjectSubagentsDir } from "../../shared/artifacts.ts";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { createCapacityResilientJsonWriter } from "../../shared/capacity-resilient-json.ts";
@@ -67,7 +68,7 @@ import { SUBAGENT_ASYNC_COMPLETE_EVENT } from "../../shared/types.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
 import { formatControlIntercomMessage, formatControlNoticeMessage, resolveControlConfig, shouldNotifyControlEvent } from "../shared/subagent-control.ts";
 import { formatSpawnBudget, getSpawnBudgetSnapshot, grantSpawnBudget, preflightSpawnBudget, preflightSpawnBudgetGrant, reserveSpawnBudget } from "../shared/spawn-budget.ts";
-import { claimRunFanoutBatch, claimRunFanoutBatchWithCommit, createRunFanoutBudget, formatRunFanoutBudget, getRunFanoutBudgetSnapshot, readRunFanoutBudgetDescriptor, RunFanoutLimitError, writeRunFanoutBudgetDescriptor } from "../shared/run-fanout-budget.ts";
+import { claimRunFanoutBatch, claimRunFanoutBatchWithCommit, createRunFanoutBudget, formatRunFanoutBudget, getRunFanoutBudgetSnapshot, readRunFanoutBudgetDescriptor, resolveRevivalRunFanoutBudget, RunFanoutLimitError, writeRunFanoutBudgetDescriptor } from "../shared/run-fanout-budget.ts";
 import { retainLiveForegroundNestedRoute } from "../../integrations/pi-web-session-liveness.ts";
 import { HERDR_FOREGROUND_CONTROL_CHANGED_EVENT } from "../../integrations/herdr-status.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
@@ -89,7 +90,7 @@ import {
 	resolveSubagentResultStatus,
 	stripDetailsOutputsForIntercomReceipt,
 } from "../../intercom/result-intercom.ts";
-import { applySteeringRecoveryAgentConfig, asyncReviveRequiresRecoveryDescriptor, buildRevivedAsyncTask, readAsyncRecoveryDescriptor, resolveAsyncResumeTarget, resolveAsyncRunLocation } from "../background/async-resume.ts";
+import { applySteeringRecoveryAgentConfig, asyncReviveRequiresRecoveryDescriptor, buildRevivedAsyncTask, readAsyncRecoveryDescriptor, recordAsyncRunOwnerTransfer, resolveAsyncResumeTarget, resolveAsyncRunLocation } from "../background/async-resume.ts";
 import { closeSteerInbox, consumeSteerRequests, deliverInterruptRequest, readRevivalBriefs, requestAsyncSteer, watchAsyncControlInbox, type SteerDeliveryMode, type SteerRequest } from "../background/control-channel.ts";
 import { createSteeringStatus, recordSteeringRequest, steeringStatus, updateSteeringTarget, waitForSteeringAction } from "../background/steering.ts";
 import { canQueueRetainedAsyncFollowUp, steerAsyncRun } from "./async-steering-action.ts";
@@ -223,8 +224,10 @@ import {
 	type SteeringTargetState,
 } from "../../shared/types.ts";
 import { deriveChildSessionName } from "../../shared/child-session-name.ts";
+import { recoverNestedRunTree, recoveredNestedBinding, type NestedRecoveryResult } from "../background/nested-recovery.ts";
+import { recoveredSessionFileForRun } from "../shared/recovered-nested-session.ts";
 
-const MUTATING_MANAGEMENT_ACTIONS = new Set(["command.yield", "command.cancel", "create", "update", "delete", "eject", "disable", "enable", "reset", "grant-spawn-budget", "watchdog.configure", "mission.create", "mission.update", "mission.resolve-decision", "mission.attach-run", "mission.close", "inspector.open", "inspector.close", "project.open", "project.close", "worktree.discard", "worktree.cleanup", "lane.recordMerge", "lane.recordSupersession", "refine", "refine.rollback", "dismiss", "schedule.create", "schedule.pause", "schedule.resume", "schedule.run", "schedule.run-due", "schedule.delete"]);
+const MUTATING_MANAGEMENT_ACTIONS = new Set(["recover", "command.yield", "command.cancel", "create", "update", "delete", "eject", "disable", "enable", "reset", "grant-spawn-budget", "watchdog.configure", "mission.create", "mission.update", "mission.resolve-decision", "mission.attach-run", "mission.close", "inspector.open", "inspector.close", "project.open", "project.close", "worktree.discard", "worktree.cleanup", "lane.recordMerge", "lane.recordSupersession", "refine", "refine.rollback", "dismiss", "schedule.create", "schedule.pause", "schedule.resume", "schedule.run", "schedule.run-due", "schedule.delete"]);
 const DESTRUCTIVE_MANAGEMENT_ACTIONS = new Set(["command.cancel", "delete", "eject", "disable", "reset", "mission.close", "worktree.discard", "refine.rollback", "inspector.close", "project.close", "stop", "interrupt", "schedule.delete"]);
 
 function resolveSteerDeliveryMode(mode: SubagentParamsLike["mode"]): SteerDeliveryMode | undefined {
@@ -325,6 +328,7 @@ interface TaskParam {
 export interface SubagentParamsLike {
 	action?: string;
 	id?: string;
+	nestedRootRunId?: string;
 	runId?: string;
 	dir?: string;
 	handoffPath?: string;
@@ -332,6 +336,8 @@ export interface SubagentParamsLike {
 	merge?: unknown;
 	supersession?: unknown;
 	index?: number;
+	/** resume only: explicitly take over a finished async run owned by another session. */
+	takeOver?: boolean;
 	toolCallId?: string;
 	childId?: string;
 	view?: "fleet" | "transcript";
@@ -634,14 +640,22 @@ function formatForegroundActivity(control: SubagentState["foregroundControls"] e
 	return [`active ${seconds}s ago`, ...facts].join(" | ");
 }
 
+function recoveredSessionContext(deps: ExecutorDeps) {
+	return { nativeOwnerRunId: deps.childRuntime?.recoveredNestedParentRunId, nativeSessions: deps.childRuntime?.recoveredNestedSessions };
+}
 function nestedResolutionScopeForExecutor(deps: ExecutorDeps): NestedRunResolutionScope | undefined {
 	if (deps.allowMutatingManagementActions !== false) return undefined;
 	const route = inheritedNestedRoute(deps);
 	const address = route ? inheritedNestedParentAddress(deps) : undefined;
-	return {
-		routes: route ? [route] : [],
-		...(address ? { descendantOf: { parentRunId: address.parentRunId, ...(address.parentStepIndex !== undefined ? { parentStepIndex: address.parentStepIndex } : {}) } } : {}),
-	};
+	const scope: NestedRunResolutionScope = { routes: route ? [route] : [] };
+	if (address) {
+		scope.descendantOf = { parentRunId: address.parentRunId };
+		if (address.parentStepIndex !== undefined) scope.descendantOf.parentStepIndex = address.parentStepIndex;
+		if (deps.childRuntime?.recoveredNestedParentRunId) {
+			scope.descendantOf.previousParentRunId = deps.childRuntime.recoveredNestedParentRunId;
+		}
+	}
+	return scope;
 }
 
 function trustedSessionRootsForStatus(ctx: ExtensionContext, deps: ExecutorDeps): string[] {
@@ -783,7 +797,7 @@ function foregroundChildActivityFromProgress(progress: SingleResult["progress"] 
 	};
 }
 
-function rememberForegroundRun(state: SubagentState, input: { modelResponseAliases?: Record<string, string[]>; runId: string; mode: "single" | "parallel" | "chain"; cwd: string; sessionId: string | null; results: SingleResult[]; params: SubagentParamsLike; effectiveOutput?: string | boolean; effectiveOutputMode: OutputMode; extensionBindings?: ExtensionBindings; requiredExtensions?: SteeringRecoveryDescriptor["requiredExtensions"] }): void {
+function rememberForegroundRun(state: SubagentState, input: { runtimeAgentSnapshot?: RuntimeAgentSnapshot; modelResponseAliases?: Record<string, string[]>; runId: string; mode: "single" | "parallel" | "chain"; cwd: string; sessionId: string | null; results: SingleResult[]; params: SubagentParamsLike; effectiveOutput?: string | boolean; effectiveOutputMode: OutputMode; extensionBindings?: ExtensionBindings; requiredExtensions?: SteeringRecoveryDescriptor["requiredExtensions"] }): void {
 	state.foregroundRuns ??= new Map();
 	const previous = state.foregroundRuns.get(input.runId);
 	const updatedAt = Date.now();
@@ -796,6 +810,7 @@ function rememberForegroundRun(state: SubagentState, input: { modelResponseAlias
 		children: input.results.map((result, index) => {
 			const resumeContract = omitUndefinedProperties({
 				modelResponseAliases: input.modelResponseAliases,
+				runtimeAgentSnapshot: input.runtimeAgentSnapshot,
 				outputSchema: input.params.outputSchema,
 				agentContract: input.params.agentContract,
 				acceptance: input.params.acceptance,
@@ -1039,7 +1054,7 @@ function isExactResumeError(error: unknown, source: "async" | "foreground", requ
 	return new RegExp(`\\b${source} run '${escapeRegExp(requested)}'`, "i").test(error.message);
 }
 
-function resolveResumeTarget(params: SubagentParamsLike, state: SubagentState, options: { asyncRequireSessionFile?: boolean; exactOnly?: boolean } = {}): ResumeSourceTarget {
+function resolveResumeTarget(params: SubagentParamsLike, state: SubagentState, options: { asyncRequireSessionFile?: boolean; exactOnly?: boolean; takeOver?: boolean } = {}): ResumeSourceTarget {
 	const requested = (params.id ?? params.runId)?.trim() ?? "";
 	let foregroundTarget: ForegroundResumeSourceTarget | undefined;
 	let foregroundError: unknown;
@@ -1061,6 +1076,7 @@ function resolveResumeTarget(params: SubagentParamsLike, state: SubagentState, o
 			...resolveAsyncResumeTarget(asyncParams, {}, compactOptional<NonNullable<Parameters<typeof resolveAsyncResumeTarget>[2]>>({
 				requireSessionFile: options.asyncRequireSessionFile,
 				sessionId: state.currentSessionId ?? undefined,
+				takeOver: options.takeOver,
 			})),
 		};
 	} catch (error) {
@@ -1516,7 +1532,7 @@ function pathWithin(base: string, candidate: string): boolean {
 	return resolvedCandidate === resolvedBase || resolvedCandidate.startsWith(`${resolvedBase}${path.sep}`);
 }
 
-export function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: string[], recoveryDescriptor?: SteeringRecoveryDescriptor): string {
+export function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: string[], recoveryDescriptor?: SteeringRecoveryDescriptor, exactNativeSessionFile?: string): string {
 	const sessionFile = nestedRunSessionFile(run);
 	if (!sessionFile) throw new Error(`Nested run '${run.id}' does not have a persisted session file to resume from.`);
 	if (path.extname(sessionFile) !== ".jsonl") throw new Error(`Nested run '${run.id}' session file must be a .jsonl file: ${sessionFile}`);
@@ -1529,7 +1545,7 @@ export function validateNestedSessionFile(run: NestedRunSummary, trustedSessionR
 	const trustedRoots = trustedSessionRoots
 		.filter((root) => fs.existsSync(root))
 		.map((root) => fs.realpathSync(root));
-	if (!trustedRoots.some((root) => pathWithin(root, realSessionFile))) {
+	if (realSessionFile !== exactNativeSessionFile && !trustedRoots.some((root) => pathWithin(root, realSessionFile))) {
 		throw new Error(`Nested run '${run.id}' session file is outside trusted nested session roots: ${sessionFile}`);
 	}
 	// A revival continues its source's session file; its own launch descriptor names the run that owns that file.
@@ -1539,7 +1555,7 @@ export function validateNestedSessionFile(run: NestedRunSummary, trustedSessionR
 		? recoveryDescriptor.sessionOwnerRunId
 		: run.id;
 	// Only directories below a trusted root can name the owner; ancestors such as the root itself never count.
-	const ownedBelowTrustedRoot = trustedRoots.some((root) => pathWithin(root, realSessionFile)
+	const ownedBelowTrustedRoot = realSessionFile === exactNativeSessionFile || trustedRoots.some((root) => pathWithin(root, realSessionFile)
 		&& path.relative(root, realSessionFile).split(path.sep).slice(0, -1).includes(owner));
 	if (!ownedBelowTrustedRoot) {
 		throw new Error(`Nested run '${run.id}' session file is not under that nested run's session directory: ${sessionFile}`);
@@ -1555,7 +1571,20 @@ export function readNestedRecoveryDescriptor(asyncDir: string | undefined, runId
 	return recoveryDescriptor;
 }
 
-function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "nested" }, trustedSessionRoots: string[]): NestedResumeSourceTarget {
+/** A revived nested run works where its source ran; the nested run directory only holds its records. */
+export function resolveNestedResumeCwd(runId: string, status: Pick<AsyncStatus, "cwd"> | null | undefined, recoveryDescriptor: Pick<SteeringRecoveryDescriptor, "cwd"> | undefined): string | undefined {
+	const cwd = status?.cwd ?? recoveryDescriptor?.cwd;
+	if (!cwd) return undefined;
+	const resolved = path.resolve(cwd);
+	try {
+		if (!fs.statSync(resolved).isDirectory()) throw new Error("path is not a directory");
+	} catch (error) {
+		throw new Error(`Nested run '${runId}' required cwd does not exist: ${cwd}`, { cause: error instanceof Error ? error : undefined });
+	}
+	return resolved;
+}
+
+function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "nested" }, trustedSessionRoots: string[], recoveredContext?: ReturnType<typeof recoveredSessionContext>): NestedResumeSourceTarget {
 	const run = match.match.run;
 	if (run.state === "running" || run.state === "queued") throw new Error(`Nested run '${run.id}' is live; route the follow-up to the owner process instead.`);
 	if (run.state === "stopped") throw new Error(`Nested run '${run.id}' was stopped and cannot be resumed. Start a new run instead.`);
@@ -1564,6 +1593,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 	const state = run.state === "complete" || run.state === "failed" || run.state === "paused" ? run.state : "failed";
 	const asyncDir = resolveNestedAsyncDir(match.match.rootRunId, run);
 	const recoveryDescriptor = readNestedRecoveryDescriptor(asyncDir, run.id, agent);
+	const exactNativeSessionFile = asyncDir ? recoveredSessionFileForRun({ run, rootRunId: match.match.rootRunId, dir: asyncDir, descriptor: recoveryDescriptor, nativeOwnerRunId: recoveredContext?.nativeOwnerRunId, nativeSessions: recoveredContext?.nativeSessions }) : undefined;
 	return compactOptional<NestedResumeSourceTarget>({
 		kind: "revive",
 		source: "nested",
@@ -1571,8 +1601,8 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 		state,
 		agent,
 		index: 0,
-		cwd: asyncDir ? path.dirname(asyncDir) : undefined,
-		sessionFile: validateNestedSessionFile(run, trustedSessionRoots, recoveryDescriptor),
+		cwd: resolveNestedResumeCwd(run.id, asyncDir ? readNestedRunStatus(asyncDir, run) : null, recoveryDescriptor),
+		sessionFile: validateNestedSessionFile(run, trustedSessionRoots, recoveryDescriptor, exactNativeSessionFile),
 		...(run.capabilityCeiling ? { capabilityCeiling: run.capabilityCeiling } : {}),
 		...(recoveryDescriptor ? { recoveryDescriptor } : {}),
 	});
@@ -1909,9 +1939,9 @@ function resolveRequestedResumeTarget(params: SubagentParamsLike, deps: Executor
 			...(deps.config.defaultSessionDir ? [path.resolve(deps.expandTilde(deps.config.defaultSessionDir))] : []),
 			...(parentSessionFile ? [deps.getSubagentSessionRoot(parentSessionFile)] : []),
 		];
-		return resolveNestedResumeTarget(resolved, trustedSessionRoots);
+		return resolveNestedResumeTarget(resolved, trustedSessionRoots, recoveredSessionContext(deps));
 	}
-	return resolveResumeTarget(params, deps.state, { asyncRequireSessionFile: false });
+	return resolveResumeTarget(params, deps.state, { asyncRequireSessionFile: false, takeOver: params.takeOver === true });
 }
 
 async function resumeAsyncRun(input: {
@@ -1993,6 +2023,14 @@ async function resumeAsyncRun(input: {
 	}
 
 	input.deps.state.currentSessionId = resolveCurrentSessionId(input.ctx.sessionManager);
+	if (target.source === "async" && target.ownerTransfer && target.asyncDir) {
+		try {
+			recordAsyncRunOwnerTransfer(target.asyncDir, target.ownerTransfer);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return { content: [{ type: "text", text: `Cannot take over async run '${target.runId}': ${message}` }], isError: true, details: { mode: "management", results: [] } };
+		}
+	}
 	const effectiveCwd = target.cwd ?? input.requestCwd;
 	const scope: AgentScope = resolveExecutionAgentScope(input.params.agentScope);
 	const discovered = input.deps.discoverAgents(effectiveCwd, scope, input.parentModel?.provider);
@@ -2196,6 +2234,12 @@ async function resumeAsyncRun(input: {
 	if (!revivalSessionFile) {
 		return { content: [{ type: "text", text: `Async run '${target.runId}' child ${target.index} does not have a persisted session file to resume from.` }], isError: true, details: { mode: "management", results: [] } };
 	}
+	let recoveredOwnership: ReturnType<typeof recoveredNestedBinding>;
+	try {
+		recoveredOwnership = recoveredNestedBinding(input.deps.state, revivalSessionFile, target.agent);
+	} catch (error) {
+		return { content: [{ type: "text", text: error instanceof Error ? error.message : "Recovered ownership validation failed." }], isError: true, details: { mode: "management", results: [] } };
+	}
 	if (target.source === "async" && asyncReviveRequiresRecoveryDescriptor(target)) {
 		return { content: [{ type: "text", text: `Async child '${target.runId}' is missing its required run fan-out recovery identity. Start a new run instead.` }], isError: true, details: { mode: "management", results: [] } };
 	}
@@ -2259,6 +2303,11 @@ async function resumeAsyncRun(input: {
 		goal: effectiveFollowUp,
 		agentConfig,
 		recoveryAgentConfig,
+		nestedRoute: recoveredOwnership?.route,
+		recoveredNestedParentRunId: recoveredOwnership?.ownerRunId,
+		recoveredNestedSessions: recoveredOwnership?.sessions,
+		// A retained contract cannot silently acquire runtime definitions registered later.
+		runtimeAgentSnapshot: recoveryDescriptor ? recoveryDescriptor.runtimeAgentSnapshot ?? {version: 1, agents: []} : foregroundContract ? foregroundContract.runtimeAgentSnapshot ?? {version: 1, agents: []} : undefined,
 		ctx: compactOptional<Parameters<typeof executeAsyncSingle>[1]["ctx"]>({
 			pi: input.deps.pi,
 			cwd: input.requestCwd,
@@ -2337,7 +2386,7 @@ async function resumeAsyncRun(input: {
 		// Recovery descriptors, remembered foreground runs, and current workflow roots
 		// preserve parent authority before the selected agent's descendant ceiling.
 		capabilityCeiling: intersectSubagentCapabilityCeilings(recoveryDescriptor?.capabilityCeiling ?? (target.source === "foreground" || (target.source === "async" && target.mode === "workflow") ? target.capabilityCeiling : undefined), resolveCurrentSubagentCapabilityCeiling(input.deps.state.currentSessionId)),
-		runFanoutBudget: input.params.runFanoutBudget ?? recoveryDescriptor?.runFanoutBudget ?? createRunFanoutBudget(runId, resolveMaxSubagentSpawnsPerRun(input.deps.config.maxSubagentSpawnsPerRun)),
+		runFanoutBudget: resolveRevivalRunFanoutBudget({ requested: input.params.runFanoutBudget, inherited: inheritedRunFanoutBudget(input.deps), recovered: recoveryDescriptor?.runFanoutBudget, runId, limit: resolveMaxSubagentSpawnsPerRun(input.deps.config.maxSubagentSpawnsPerRun) }),
 		parentWorkflowRunId: input.params.workflowParentRunId,
 		workflowKey: input.params.workflowKey,
 		activeAsyncCapacity,
@@ -4325,11 +4374,15 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 
 	const deadlineAt = data.deadlineAt ?? (data.timeoutMs !== undefined ? Date.now() + data.timeoutMs : undefined);
 	let r: Awaited<ReturnType<typeof runSync>> | undefined;
+	let foregroundRuntimeAgents: RuntimeAgentSnapshot | undefined;
 	let resolveDetachedWorkflowChild: ((result: Awaited<ReturnType<typeof runSync>>) => void) | undefined;
 	const detachedWorkflowChild = params.workflowAwaitDetached === true
 		? new Promise<Awaited<ReturnType<typeof runSync>>>((resolve) => { resolveDetachedWorkflowChild = resolve; })
 		: undefined;
 	try {
+		const selectedAgent = resolveAgentName(params.agent!, agents).agent;
+		const runtimeAgentSnapshot = selectedAgent ? prepareRuntimeAgentSnapshot(deps.pi, selectedAgent, data.capabilityCeiling) : undefined;
+		foregroundRuntimeAgents = runtimeAgentSnapshot;
 		const launched = await runSync(ctx.cwd, agents, params.agent!, task, compactOptional<Parameters<typeof runSync>[4]>({
 			machine: foregroundMachine,
 			parentProviderRegistry: ctx.modelRegistry,
@@ -4337,6 +4390,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 			remoteReads: foregroundMachine ? readsOverride : undefined,
 			permissions: deps.config.permissions,
 			runtimeSnapshotHost: deps.pi,
+			runtimeAgentSnapshot,
+			runtimeAgentOwner: deps.pi,
 			parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
 			requiredExtensions,
 			childRuntime: deps.childRuntime,
@@ -4499,7 +4554,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		usageBudget: usageBudgetState(data.usageBudget, totalCost),
 		...(worktreeHandoff?.reference ? { parallelHandoff: worktreeHandoff.reference } : {}),
 	}));
-	rememberForegroundRun(deps.state, { modelResponseAliases, runId, mode: "single", cwd: singleCwd, sessionId: data.parentSessionId, results: details.results, params, effectiveOutput, effectiveOutputMode, extensionBindings: params.extensionBindings, requiredExtensions });
+	rememberForegroundRun(deps.state, { runtimeAgentSnapshot: foregroundRuntimeAgents, modelResponseAliases, runId, mode: "single", cwd: singleCwd, sessionId: data.parentSessionId, results: details.results, params, effectiveOutput, effectiveOutputMode, extensionBindings: params.extensionBindings, requiredExtensions });
 
 	const suppressRoutineResultIntercom = shouldSuppressRoutineResultIntercom({ suppressRoutineResultIntercom: params.suppressRoutineResultIntercom, results: [r] });
 	if (!r.detached && !r.interrupted && !suppressRoutineResultIntercom) {
@@ -5080,7 +5135,9 @@ export function prepareWorkflowLaunchParams(
 		const agentContract = Object.hasOwn(childParams, "agentContract") ? childParams.agentContract : workflowDefaults.agentContract;
 		if (agentContract !== undefined && !isAgentContract(agentContract as AgentContract)) throw new Error("agentContract must be { version: 1 }.");
 		const acceptance = Object.hasOwn(childParams, "acceptance") ? childParams.acceptance : workflowDefaults.acceptance;
-		const output = Object.hasOwn(childParams, "output") ? childParams.output : workflowDefaults.output;
+		// The workflow-level output is the aggregate result. A retained child keeps its recorded output,
+		// which admission already claimed; handing it the aggregate path would share one file across children.
+		const output = Object.hasOwn(childParams, "output") ? childParams.output : undefined;
 		if (output !== undefined && typeof output !== "string" && typeof output !== "boolean") throw new Error("output must be a path string or boolean.");
 		const outputMode = Object.hasOwn(childParams, "outputMode") ? childParams.outputMode : workflowDefaults.outputMode;
 		if (outputMode !== undefined && outputMode !== "inline" && outputMode !== "file-only") throw new Error("outputMode must be 'inline' or 'file-only'.");
@@ -6721,6 +6778,27 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			requestParentModel = normalizeParentModel(ctx.model);
 		}
 		if (action) {
+			if (action === "recover") {
+				const ownerRunId = paramsWithResolvedCwd.id ?? "";
+				const rootRunId = paramsWithResolvedCwd.nestedRootRunId ?? "";
+				const refused = (code: string, message: string): NestedRecoveryResult => ({ status: "blocked", ownerRunId, rootRunId, code, message, descendants: [] });
+				let recovery: NestedRecoveryResult;
+				if (deps.allowMutatingManagementActions === false) {
+					recovery = refused("CHILD_SAFE", "recover is not available from child-safe fanout mode.");
+				} else if (Object.entries(directParams).some(([key, value]) => value !== undefined && !["action", "id", "nestedRootRunId", "cwd"].includes(key))) {
+					recovery = refused("INVALID_TARGET", "recover requires exact id and nestedRootRunId without launch or directory parameters.");
+				} else {
+					const parentSessionFile = ctx.sessionManager.getSessionFile();
+					recovery = parentSessionFile
+						? recoverNestedRunTree({ ownerRunId, nestedRootRunId: rootRunId }, { state: deps.state, parentSessionFile })
+						: refused("PARENT_MISMATCH", "An original persisted parent session is required.");
+				}
+				return {
+					content: [{ type: "text", text: recovery.status === "recovered" ? recovery.message : `Nested recovery refused: ${recovery.message}` }],
+					isError: recovery.status === "blocked",
+					details: { mode: "management", results: [], recovery },
+				};
+			}
 			if (action === "worktree.cleanup") {
 				if (deps.allowMutatingManagementActions === false) {
 					return { content: [{ type: "text", text: "Action 'worktree.cleanup' is not available from child-safe subagent fanout mode." }], isError: true, details: { mode: "management", results: [] } };

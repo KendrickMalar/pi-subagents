@@ -28,6 +28,10 @@ const ROUTE_INDEX_DIR = ".route-index";
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_STEPS = 12;
 const MAX_CHILDREN = 16;
+// Version 2 registries keep every child. Older registries truncated children to
+// MAX_CHILDREN while marking the dropped children's events processed, so they
+// replay the retained events once to restore what was dropped.
+const REGISTRY_SCHEMA_VERSION = 2;
 const MAX_DEPTH = 3;
 
 type NestedStatusEventType = "subagent.nested.started" | "subagent.nested.updated" | "subagent.nested.completed";
@@ -72,6 +76,7 @@ export interface NestedRegistry {
 	updatedAt: number;
 	children: NestedRunSummary[];
 	processedEvents: string[];
+	schemaVersion?: number;
 }
 
 export function isSafeNestedId(value: unknown): value is string {
@@ -327,7 +332,7 @@ function sanitizeStep(input: unknown, depth: number): NestedStepSummary | undefi
 		...(raw.wrapUpRequested === true ? { wrapUpRequested: true } : {}),
 		...(sanitizeLaunchResolvedExtensions(raw.launchResolvedExtensions) ? { launchResolvedExtensions: sanitizeLaunchResolvedExtensions(raw.launchResolvedExtensions) } : {}),
 		...(sanitizeRuntimeAcknowledgedExtensions(raw.runtimeAcknowledgedExtensions) ? { runtimeAcknowledgedExtensions: sanitizeRuntimeAcknowledgedExtensions(raw.runtimeAcknowledgedExtensions) } : {}),
-		...(depth < MAX_DEPTH && Array.isArray(raw.children) ? { children: raw.children.map((child) => sanitizeSummary(child, depth + 1)).filter((child): child is NestedRunSummary => Boolean(child)).slice(0, MAX_CHILDREN) } : {}),
+		...(depth < MAX_DEPTH && Array.isArray(raw.children) ? { children: raw.children.map((child) => sanitizeSummary(child, depth + 1)).filter((child): child is NestedRunSummary => Boolean(child)) } : {}),
 	};
 }
 
@@ -390,7 +395,7 @@ export function sanitizeSummary(input: unknown, depth = 0): NestedRunSummary | u
 		...(sanitizeLaunchResolvedExtensions(raw.launchResolvedExtensions) ? { launchResolvedExtensions: sanitizeLaunchResolvedExtensions(raw.launchResolvedExtensions) } : {}),
 		...(sanitizeRuntimeAcknowledgedExtensions(raw.runtimeAcknowledgedExtensions) ? { runtimeAcknowledgedExtensions: sanitizeRuntimeAcknowledgedExtensions(raw.runtimeAcknowledgedExtensions) } : {}),
 		...(steps && steps.length > 0 ? { steps } : {}),
-		...(depth < MAX_DEPTH && Array.isArray(raw.children) ? { children: raw.children.map((child) => sanitizeSummary(child, depth + 1)).filter((child): child is NestedRunSummary => Boolean(child)).slice(0, MAX_CHILDREN) } : {}),
+		...(depth < MAX_DEPTH && Array.isArray(raw.children) ? { children: raw.children.map((child) => sanitizeSummary(child, depth + 1)).filter((child): child is NestedRunSummary => Boolean(child)) } : {}),
 	};
 }
 
@@ -444,17 +449,17 @@ function terminal(state: NestedRunState): boolean {
 }
 
 function mergeBoundedChildren(existing: NestedRunSummary[] | undefined, incoming: NestedRunSummary[] | undefined): NestedRunSummary[] | undefined {
-	if (incoming === undefined) return existing?.slice(0, MAX_CHILDREN);
+	if (incoming === undefined) return existing;
 	const incomingById = new Map(incoming.map((child) => [child.id, child]));
 	const merged = (existing ?? []).map((child) => incomingById.get(child.id) ?? child);
 	for (const child of incoming) {
 		if (!existing?.some((prior) => prior.id === child.id)) merged.push(child);
 	}
-	return merged.slice(0, MAX_CHILDREN);
+	return merged;
 }
 
 function mergeStepSummary(existing: NestedStepSummary | undefined, incoming: NestedStepSummary): NestedStepSummary {
-	if (!existing || existing.agent !== incoming.agent) return { ...incoming, ...(incoming.children ? { children: incoming.children.slice(0, MAX_CHILDREN) } : {}) };
+	if (!existing || existing.agent !== incoming.agent) return incoming;
 	const metadata = { ...existing } as Partial<NestedStepSummary>;
 	delete metadata.status;
 	delete metadata.activityState;
@@ -510,7 +515,7 @@ function attachChild(children: NestedRunSummary[], event: NestedEventRecord): Ne
 				? existingChildren.map((child, index) => index === childIndex ? nextChild : child)
 				: [...existingChildren, nextChild];
 			updated = true;
-			return { ...item, children: nextChildren.slice(0, MAX_CHILDREN), lastUpdate: Math.max(item.lastUpdate ?? 0, event.ts) };
+			return { ...item, children: nextChildren, lastUpdate: Math.max(item.lastUpdate ?? 0, event.ts) };
 		}
 		if (!item.children?.length) return item;
 		const nextChildren = walk(item.children);
@@ -522,7 +527,7 @@ function attachChild(children: NestedRunSummary[], event: NestedEventRecord): Ne
 	const nextChild = mergeSummary(childIndex >= 0 ? next[childIndex] : undefined, event);
 	return childIndex >= 0
 		? next.map((child, index) => index === childIndex ? nextChild : child)
-		: [...next, nextChild].slice(0, MAX_CHILDREN);
+		: [...next, nextChild];
 }
 
 export function applyNestedEvent(registry: NestedRegistry, event: NestedEventRecord): NestedRegistry {
@@ -627,7 +632,7 @@ export function retainNestedLookupRoute(
 
 export interface NestedRunResolutionScope {
 	routes: NestedRoute[];
-	descendantOf?: { parentRunId: string; parentStepIndex?: number };
+	descendantOf?: { parentRunId: string; parentStepIndex?: number; previousParentRunId?: string };
 }
 
 function collectNestedRuns(children: NestedRunSummary[] | undefined, output: NestedRunSummary[] = []): NestedRunSummary[] {
@@ -642,7 +647,7 @@ function collectNestedRuns(children: NestedRunSummary[] | undefined, output: Nes
 function collectScopedNestedRuns(children: NestedRunSummary[] | undefined, scope: NestedRunResolutionScope["descendantOf"], output: NestedRunSummary[] = []): NestedRunSummary[] {
 	if (!scope) return collectNestedRuns(children, output);
 	for (const child of children ?? []) {
-		if (child.parentRunId === scope.parentRunId && (scope.parentStepIndex === undefined || child.parentStepIndex === scope.parentStepIndex)) {
+		if ((child.parentRunId === scope.parentRunId || child.parentRunId === scope.previousParentRunId) && (scope.parentStepIndex === undefined || child.parentStepIndex === scope.parentStepIndex)) {
 			collectNestedRuns([child], output);
 			continue;
 		}
@@ -701,6 +706,11 @@ export function findNestedRunById(id: string): { rootRunId: string; run: NestedR
 	return match ? { rootRunId: match.rootRunId, run: match.run } : undefined;
 }
 
+/** Older registries dropped children while marking their events processed. */
+export function nestedRegistryNeedsReplay(registry: NestedRegistry): boolean {
+	return registry.schemaVersion !== REGISTRY_SCHEMA_VERSION;
+}
+
 export function readNestedRegistry(route: NestedRoute): NestedRegistry {
 	validateRouteShape(route);
 	try {
@@ -710,10 +720,11 @@ export function readNestedRegistry(route: NestedRoute): NestedRegistry {
 			updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : 0,
 			children: Array.isArray(parsed.children) ? parsed.children.map((child) => sanitizeSummary(child)).filter((child): child is NestedRunSummary => Boolean(child)) : [],
 			processedEvents: Array.isArray(parsed.processedEvents) ? parsed.processedEvents.filter((item): item is string => typeof item === "string") : [],
+			...(typeof parsed.schemaVersion === "number" ? { schemaVersion: parsed.schemaVersion } : {}),
 		};
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		return { rootRunId: route.rootRunId, updatedAt: 0, children: [], processedEvents: [] };
+		return { rootRunId: route.rootRunId, updatedAt: 0, children: [], processedEvents: [], schemaVersion: REGISTRY_SCHEMA_VERSION };
 	}
 }
 
@@ -721,7 +732,8 @@ export function projectNestedEvents(route: NestedRoute): NestedRegistry {
 	validateRouteShape(route);
 	let registry = readNestedRegistry(route);
 	const seen = new Set(registry.processedEvents);
-	let changed = false;
+	const replayProcessed = nestedRegistryNeedsReplay(registry);
+	let changed = replayProcessed;
 	let entries: string[] = [];
 	try {
 		entries = fs.readdirSync(route.eventSink).filter((entry) => entry.endsWith(".json") || entry.endsWith(".jsonl")).sort();
@@ -729,7 +741,7 @@ export function projectNestedEvents(route: NestedRoute): NestedRegistry {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 	for (const entry of entries) {
-		if (seen.has(entry)) continue;
+		if (seen.has(entry) && !replayProcessed) continue;
 		const eventPath = path.join(route.eventSink, entry);
 		if (!containedPath(route.eventSink, eventPath)) continue;
 		let content: string;
@@ -753,7 +765,7 @@ export function projectNestedEvents(route: NestedRoute): NestedRegistry {
 		const processedEvents = [...seen];
 		const retainedEvents = processedEvents.slice(-1000);
 		const evictedEvents = processedEvents.slice(0, -1000);
-		registry = { ...registry, processedEvents: retainedEvents };
+		registry = { ...registry, processedEvents: retainedEvents, schemaVersion: REGISTRY_SCHEMA_VERSION };
 		// Parent projection is the only writer to this sidecar registry. Child and
 		// runner processes only create immutable event files, so parent status.json
 		// remains owned by the existing runner writer and is never rewritten here.

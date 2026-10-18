@@ -4,6 +4,7 @@
  * children are built in the parent process; background children are built in
  * the detached runner from the step it received in its config.
  */
+import { parseRecoveredNestedSessions } from "./recovered-nested-session.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ChildWatchdogConfig, ChildWatchdogStatusEvent } from "../../watchdog/child-status.ts";
@@ -36,6 +37,7 @@ import { createCapturedChildHooks, withChildSessionErrorReporting } from "./chil
 import type { ChildTranscriptWriter } from "../../shared/child-transcript.ts";
 import type { ChildSessionLaunch, ChildSessionStorage } from "./child-session.ts";
 import { resolveRequiredChildExtensions, type RequiredChildExtensionSnapshot } from "../../shared/required-child-extensions.ts";
+import {filterRuntimeAgentSnapshot, validateRuntimeAgentSnapshot, type RuntimeAgentSnapshot} from "../../agents/runtime-agent-snapshot.ts";
 
 /** Environment variable pi-mcp-adapter reads for the tools a child may expose. */
 export const MCP_DIRECT_TOOLS_ENV = "MCP_DIRECT_TOOLS";
@@ -45,7 +47,7 @@ export const MCP_DIRECT_TOOLS_ENV = "MCP_DIRECT_TOOLS";
  * launches inherits. Serialized into the background runner config; the
  * foreground path passes the executor's full `ChildRuntimeConfig`.
  */
-export type InheritedChildRuntime = Pick<ChildRuntimeConfig, "depth" | "maxDepth" | "nestedRoute" | "nestedParent" | "capabilityCeiling" | "thinkingCeiling" | "runFanoutBudget" | "requiredExtensions">;
+export type InheritedChildRuntime = Pick<ChildRuntimeConfig, "depth" | "maxDepth" | "nestedRoute" | "nestedParent" | "capabilityCeiling" | "thinkingCeiling" | "runFanoutBudget" | "requiredExtensions" | "runtimeAgentSnapshot">;
 
 export function inheritedChildRuntime(config: ChildRuntimeConfig | undefined): InheritedChildRuntime | undefined {
 	if (!config) return undefined;
@@ -58,6 +60,7 @@ export function inheritedChildRuntime(config: ChildRuntimeConfig | undefined): I
 		...(config.thinkingCeiling ? { thinkingCeiling: config.thinkingCeiling } : {}),
 		...(config.runFanoutBudget ? { runFanoutBudget: config.runFanoutBudget } : {}),
 		...(config.requiredExtensions ? { requiredExtensions: config.requiredExtensions } : {}),
+		...(config.runtimeAgentSnapshot ? {runtimeAgentSnapshot: validateRuntimeAgentSnapshot(config.runtimeAgentSnapshot)} : {}),
 	};
 }
 
@@ -83,6 +86,7 @@ export interface BuildInProcessChildLaunchInput {
 	subagentOnlyExtensions?: string[];
 	/** Serialized launch snapshot; omitted only for a top-level parent-process lookup. */
 	requiredExtensions?: RequiredChildExtensionSnapshot;
+	runtimeAgentSnapshot?: RuntimeAgentSnapshot;
 	systemPrompt?: string | null;
 	mcpDirectTools?: string[];
 	/** Selections the parent resolved against Pi's built-in MCP, carried to the runner. */
@@ -98,6 +102,9 @@ export interface BuildInProcessChildLaunchInput {
 	childAgentName: string;
 	childIndex: number;
 	nestedRoute?: { rootRunId: string; eventSink: string; controlInbox: string; capabilityToken: string };
+	/** Native resume admission only; never copied from the launching child's inherited runtime. */
+	recoveredNestedParentRunId?: string;
+	recoveredNestedSessions?: import("./recovered-nested-session.ts").RecoveredNestedSession[];
 	runFanoutBudget?: RunFanoutBudgetDescriptor;
 	structuredOutput?: StructuredOutputRuntime;
 	fast?: boolean;
@@ -237,6 +244,7 @@ export function buildInProcessChildLaunch(input: BuildInProcessChildLaunchInput)
 		...(parentRunId ? [{ runId: parentRunId, stepIndex: parentChildIndex, agent: input.childAgentName }] : []),
 	];
 	const nestedRoute = fanout ? (input.nestedRoute ?? inheritedRoute) : undefined;
+	if (input.recoveredNestedParentRunId !== undefined && (!fanout || input.host !== "runner" || !nestedRoute || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(input.recoveredNestedParentRunId))) throw new Error("Recovered nested ownership requires a native fanout runner and a valid route.");
 	const childDepth = resolveChildDepth(input.maxSubagentDepth, inherited);
 	const permissions = input.permissionRules && Object.keys(input.permissionRules).length > 0
 		? { rules: input.permissionRules, ...(input.permissionAuditPath ? { auditPath: input.permissionAuditPath } : {}) }
@@ -247,6 +255,8 @@ export function buildInProcessChildLaunch(input: BuildInProcessChildLaunchInput)
 		fs.mkdirSync(path.join(supervisorDir, "requests"), { recursive: true });
 		fs.mkdirSync(path.join(supervisorDir, "replies"), { recursive: true });
 	}
+	const suppliedRuntimeAgents = input.runtimeAgentSnapshot ?? input.inherited?.runtimeAgentSnapshot;
+	const runtimeAgentSnapshot = suppliedRuntimeAgents === undefined ? undefined : filterRuntimeAgentSnapshot(suppliedRuntimeAgents, toolPlan.capabilityCeiling);
 	const thinkingCeiling = intersectThinkingCeilings(input.thinkingCeiling, inherited?.thinkingCeiling);
 
 	let structuredValue: unknown;
@@ -274,6 +284,7 @@ export function buildInProcessChildLaunch(input: BuildInProcessChildLaunchInput)
 		...(toolPlan.capabilityCeiling ? { capabilityCeiling: toolPlan.capabilityCeiling } : {}),
 		...(thinkingCeiling ? { thinkingCeiling } : {}),
 		...(toolPlan.requiredExtensions.length > 0 ? { requiredExtensions: toolPlan.requiredExtensions } : {}),
+		...(fanout && !input.machine && runtimeAgentSnapshot ? {runtimeAgentSnapshot} : {}),
 		inheritProjectContext: input.inheritProjectContext,
 		inheritGlobalContext: input.inheritGlobalContext,
 		inheritSkills: input.inheritSkills,
@@ -308,6 +319,13 @@ export function buildInProcessChildLaunch(input: BuildInProcessChildLaunchInput)
 		...(toolPlan.effectiveMcpTools.length > 0 ? { mcpDirectTools: toolPlan.effectiveMcpTools } : {}),
 		fast: input.fast === true,
 	};
+	if (input.recoveredNestedParentRunId) config.recoveredNestedParentRunId = input.recoveredNestedParentRunId;
+	if (input.recoveredNestedSessions !== undefined) {
+		if (!input.recoveredNestedParentRunId || !nestedRoute) throw new Error("Recovered sessions require native recovered ownership.");
+		const sessions = parseRecoveredNestedSessions(input.recoveredNestedSessions);
+		if (sessions.some(item => item.ownerRunId !== input.recoveredNestedParentRunId || item.rootRunId !== nestedRoute.rootRunId)) throw new Error("Recovered session ownership does not match the native route.");
+		config.recoveredNestedSessions = sessions;
+	}
 	const capturedHooks = createCapturedChildHooks(config);
 
 	const extensionPaths = toolPlan.extensionArgs.filter((extensionPath) => !isSubagentRuntimeExtensionPath(extensionPath));

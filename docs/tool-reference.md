@@ -345,6 +345,23 @@ subagent_command({ action: "cancel", toolCallId: "<returned-call-id>", waitMs: 1
 
 Commands remain owned by the child session. Normal completion with unfinished commands cancels them and fails the run. Interrupt, stop, timeout, and disposal clean up owned commands. Controls do not transfer processes out of the child or create detached services. Native bash `timeout` remains command-scoped; `toolTimeoutMs` covers an open tool call and does not become a yielded process deadline.
 
+### recover
+
+`recover` は、終了したmanagerの旧nested管理範囲を、**元の親セッションからだけ**明示的に照合・復元します。子を起動・停止せず、通常のstatus/resumeの権限も広げません。
+
+```ts
+subagent({ action: "recover", id: "<exact-manager-run-id>", nestedRootRunId: "<exact-nested-root-id>" })
+```
+
+- 完全なIDだけを指定します。prefix・dir・force・model/tool/timeout等の上書き・実行引数との混在は拒否します。child-safe呼出しも拒否します。
+- 保存された親session、route identity、manager/子の所属とfanout budget、terminal proof、canonical session leaseを照合します。他の親・root不一致・生存中・unknown proof・所有中/読取り不能leaseは拒否し、旧記録を成功に書き換えません。
+- 同一runner内で動くネイティブPiは別writerの証明が適用外です。対応するrunnerの終了証明が必要で、raw stepのnot-startedをobservedへ変換しません。
+- 成功時は既存のnative event投影で終端状態を反映し、private auditを保存します。`details.recovery` はstatus/code、対象ID、各子の終端・writer証明の適用可否・lease・再開可否を返し、capability tokenを返しません。
+- 最終照合とevent投影・audit保存の間は、既存のrevival leaseをmanagerと全対象sessionに一時取得します。取得できなければ公開せずblockedです。照合後は自分のleaseだけを解放します。返す再開可否は照合時点の診断であり、後続のresumeは改めて排他leaseを取得します。
+- 実際の再開は別の `resume` です。元managerの保存sessionに対してだけ、検証済み旧子の範囲を引き継ぎます。model/tool/ceiling/予算と排他leaseは既存の検査を通します。引き継ぎ範囲は孫へ継承しません。
+- 旧子がTask専用の保存先を使っている場合、検証済みrun/root/owner/agentに結び付いた正確なcanonical session fileとfile identity・status/descriptor digestだけをprivate native契約で渡します。通常のtrusted rootや公開引数は拡張しません。改変・置換・別所有者・証拠不足は許可せず、孫へfile grantを継承しません。
+- root所属の証明が足りない旧artifactは、同じcwdや人の文章で採用せずblockedのままにします。別CLIやmetadata手編集による回避はしません。
+
 ### resume
 
 `resume` revives a paused, completed, or failed async/foreground child by starting a new child from its stored session file. Stopped runs remain non-resumable, and it does not interrupt a live top-level async child. Use `steer` for acknowledged live async guidance.

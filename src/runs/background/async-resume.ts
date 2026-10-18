@@ -1,9 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { DIRS, RUNNER_LAUNCHER_NAME_PATTERN, type AcceptanceInput, type AsyncStatus, type SteeringRecoveryDescriptor, type SubagentRunMode } from "../../shared/types.ts";
 import type { AgentConfig } from "../../agents/agents.ts";
 import { normalizeExtensionBindings } from "../shared/extension-bindings.ts";
 import { snapshotRequiredChildExtensions } from "../../shared/required-child-extensions.ts";
+import {validateRuntimeAgentSnapshot} from "../../agents/runtime-agent-snapshot.ts";
 import { normalizeWorkflowLaneMetadata } from "../shared/lane-metadata.ts";
 import { validateAcceptanceInput } from "../shared/acceptance.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
@@ -36,6 +38,14 @@ export interface AsyncResumeDeps {
 export interface AsyncResumeOptions {
 	requireSessionFile?: boolean;
 	sessionId?: string;
+	/** Explicit owner re-assignment: resume a finished run that another session owns (e.g. after that session died).
+	 * Never applies to a run that is still running. The caller records the transfer with recordAsyncRunOwnerTransfer. */
+	takeOver?: boolean;
+}
+
+export interface AsyncRunOwnerTransfer {
+	fromSessionId?: string;
+	toSessionId: string;
 }
 
 export type AsyncResumeTarget = {
@@ -60,6 +70,8 @@ export type AsyncResumeTarget = {
 	launchContractDigest?: string;
 	runner?: NonNullable<AsyncStatus["steps"]>[number]["runner"];
 	externalJob?: NonNullable<AsyncStatus["steps"]>[number]["externalJob"];
+	/** Set only when an explicit takeOver resolved a run owned by another session. */
+	ownerTransfer?: AsyncRunOwnerTransfer;
 };
 
 interface AsyncResultFile {
@@ -329,7 +341,7 @@ export function readAsyncRecoveryDescriptor(asyncDir: string | undefined): Steer
 		"artifactsDir", "maxOutput", "controlConfig", "context", "intercomBridge", "absoluteDeadlineAt", "initialTurnBudget", "initialToolBudget", "maxSubagentDepth", "share", "capabilityCeiling",
 		"launchResolvedExtensions", "runFanoutBudget", "lane", "baseRef", "launcher",
 		"extensionBindings",
-		"requiredExtensions",
+		"requiredExtensions", "runtimeAgentSnapshot",
 	]);
 	for (const field of Object.keys(parsed)) {
 		if (!allowedFields.has(field)) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': unknown field '${field}'.`);
@@ -354,6 +366,7 @@ export function readAsyncRecoveryDescriptor(asyncDir: string | undefined): Steer
 		try { parsed.requiredExtensions = snapshotRequiredChildExtensions(parsed.requiredExtensions, "requiredExtensions"); }
 		catch (error) { throw new Error(`Invalid async recovery descriptor '${descriptorPath}': ${error instanceof Error ? error.message : String(error)}`); }
 	}
+	if (parsed.runtimeAgentSnapshot !== undefined) parsed.runtimeAgentSnapshot = validateRuntimeAgentSnapshot(parsed.runtimeAgentSnapshot);
 	if (parsed.lane !== undefined) parsed.lane = normalizeWorkflowLaneMetadata(parsed.lane, `Invalid async recovery descriptor '${descriptorPath}': lane`);
 	if (parsed.agentContract !== undefined) {
 		if (!parsed.agentContract || typeof parsed.agentContract !== "object" || Array.isArray(parsed.agentContract)) throw new Error(`Invalid async recovery descriptor '${descriptorPath}': agentContract must be an object.`);
@@ -466,6 +479,21 @@ function validateResumeCwd(runId: string, cwd: string | undefined): string | und
 }
 
 export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncResumeDeps = {}, options: AsyncResumeOptions = {}): AsyncResumeTarget {
+	const owner: { transfer?: AsyncRunOwnerTransfer } = {};
+	const target = resolveAsyncResumeTargetFor(params, deps, options, owner);
+	return owner.transfer ? { ...target, ownerTransfer: owner.transfer } : target;
+}
+
+/** Re-assigns a run's owner session after an explicit takeOver; the transfer stays in status.json as an audit trail. */
+export function recordAsyncRunOwnerTransfer(asyncDir: string, transfer: AsyncRunOwnerTransfer & { at?: number }): void {
+	const statusPath = path.join(asyncDir, "status.json");
+	const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as Record<string, unknown>;
+	const previous = Array.isArray(status.ownerTransfers) ? status.ownerTransfers : [];
+	const entry = { ...(transfer.fromSessionId !== undefined ? { from: transfer.fromSessionId } : {}), to: transfer.toSessionId, at: transfer.at ?? Date.now() };
+	writeAtomicJson(statusPath, { ...status, sessionId: transfer.toSessionId, ownerTransfers: [...previous, entry] });
+}
+
+function resolveAsyncResumeTargetFor(params: AsyncResumeParams, deps: AsyncResumeDeps, options: AsyncResumeOptions, owner: { transfer?: AsyncRunOwnerTransfer }): AsyncResumeTarget {
 	const asyncDirRoot = deps.asyncDirRoot ?? DIRS.async;
 	const resultsDir = deps.resultsDir ?? DIRS.results;
 	const requireSessionFile = options.requireSessionFile ?? true;
@@ -484,7 +512,10 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const runId = status?.runId ?? result?.runId ?? result?.id ?? location.resolvedId ?? (location.asyncDir ? path.basename(location.asyncDir) : "unknown");
 	const mode = resumeTargetMode(status, result);
 	if (options.sessionId && ((status && status.sessionId !== options.sessionId) || (result && result.sessionId !== options.sessionId))) {
-		throw new Error(`Async run '${runId}' was not found in the active session.`);
+		if (!options.takeOver) throw new Error(`Async run '${runId}' was not found in the active session.`);
+		if (!status || !location.asyncDir) throw new Error(`Async run '${runId}' has no status file, so its owner cannot be taken over.`);
+		if (status.state === "running" || status.state === "queued") throw new Error(`Async run '${runId}' is still running in another session; takeOver applies only to finished runs.`);
+		owner.transfer = { ...(status.sessionId !== undefined ? { fromSessionId: status.sessionId } : {}), toSessionId: options.sessionId };
 	}
 	if (recoveryDescriptor && recoveryDescriptor.sourceRunId !== runId) throw new Error(`Async run '${runId}' has a recovery descriptor for a different source run.`);
 	const state = status?.state ?? (result ? resultState(result) : undefined);
