@@ -80,6 +80,7 @@ import { usageBudgetState } from "../shared/usage-budget.ts";
 import type { ImportedAsyncRoot } from "./chain-root-attachment.ts";
 import type { SessionLeaseRequest } from "../shared/session-lease.ts";
 import { finalizeProcessTerminal, initializeProcessTerminal, readProcessTerminal } from "./process-terminal.ts";
+import { trackRunnerClosure } from "./runner-closures.ts";
 import { persistRunnerStartupFailure } from "./runner-startup-failure.ts";
 import type { ActiveAsyncCapacityHandle } from "./active-async-capacity.ts";
 import { statusStepDescription } from "./chain-append.ts";
@@ -807,8 +808,11 @@ function spawnRunner(cfg: object, suffix: string, cwd: string, initialStatus: Om
 		});
 		closeFd(stdoutFd);
 		closeFd(stderrFd);
+		let closureFinalized!: () => void;
+		trackRunnerClosure(new Promise<void>((resolve) => { closureFinalized = resolve; }));
 		proc.on("error", (error) => {
 			console.error(`[pi-subagents] async spawn failed: ${error.message}`);
+			if (typeof proc.pid !== "number") closureFinalized();
 		});
 		proc.once("close", (exitCode, signal) => {
 			const finalize = () => {
@@ -871,8 +875,15 @@ function spawnRunner(cfg: object, suffix: string, cwd: string, initialStatus: Om
 			}
 			onProcessTerminal?.(persisted);
 			};
-			if (startupPath) setImmediate(finalize);
-			else finalize();
+			const settle = () => {
+				try {
+					finalize();
+				} finally {
+					closureFinalized();
+				}
+			};
+			if (startupPath) setImmediate(settle);
+			else settle();
 		});
 		if (typeof proc.pid !== "number") {
 			return { error: `async runner did not produce a pid for cwd: ${cwd}` };
