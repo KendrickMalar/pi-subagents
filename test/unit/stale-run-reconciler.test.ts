@@ -7,7 +7,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { writeAsyncResultFile, writePendingAsyncResultFile } from "../../src/runs/background/result-files.ts";
 import { finalizeProcessTerminal, initializeProcessTerminal, readProcessTerminal } from "../../src/runs/background/process-terminal.ts";
-import { checkPidLiveness, reconcileAsyncRun } from "../../src/runs/background/stale-run-reconciler.ts";
+import { checkPidLiveness, defaultStaleAlivePidMs, reconcileAsyncRun } from "../../src/runs/background/stale-run-reconciler.ts";
 import { summarizeAsyncStatus } from "../../src/runs/background/async-status.ts";
 
 function tempRoot(prefix: string): string {
@@ -687,6 +687,43 @@ describe("async stale-run reconciliation", () => {
 			assert.equal(result.status?.state, "failed");
 			assert.match(result.message ?? "", /PID .* is still live; status has not updated/);
 		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("reads the default stale threshold from PI_SUBAGENTS_STALE_ALIVE_PID_MS and ignores invalid values", () => {
+		const day = 24 * 60 * 60 * 1000;
+		assert.equal(defaultStaleAlivePidMs({}), day);
+		assert.equal(defaultStaleAlivePidMs({ PI_SUBAGENTS_STALE_ALIVE_PID_MS: "1800000" }), 1_800_000);
+		for (const bad of ["", "0", "-5", "abc", "1.5", "1e3", " 10 "]) {
+			assert.equal(defaultStaleAlivePidMs({ PI_SUBAGENTS_STALE_ALIVE_PID_MS: bad }), day, `value ${JSON.stringify(bad)}`);
+		}
+	});
+
+	it("uses the environment stale threshold when no explicit option is given", () => {
+		const root = tempRoot("pi-stale-env-threshold-");
+		const previous = process.env.PI_SUBAGENTS_STALE_ALIVE_PID_MS;
+		try {
+			const asyncDir = path.join(root, "run-env-threshold");
+			const resultsDir = path.join(root, "results");
+			writeStatus(asyncDir, {
+				runId: "run-env-threshold",
+				mode: "single",
+				state: "running",
+				pid: 12345,
+				startedAt: 1000,
+				lastUpdate: 1000,
+				steps: [{ agent: "worker", status: "running", startedAt: 1000 }],
+			});
+			delete process.env.PI_SUBAGENTS_STALE_ALIVE_PID_MS;
+			assert.equal(reconcileAsyncRun(asyncDir, { resultsDir, kill: () => true, now: () => 1000 + 60_000 }).repaired, false);
+			process.env.PI_SUBAGENTS_STALE_ALIVE_PID_MS = "30000";
+			const result = reconcileAsyncRun(asyncDir, { resultsDir, kill: () => true, now: () => 1000 + 60_000 });
+			assert.equal(result.repaired, true);
+			assert.equal(result.status?.state, "failed");
+		} finally {
+			if (previous === undefined) delete process.env.PI_SUBAGENTS_STALE_ALIVE_PID_MS;
+			else process.env.PI_SUBAGENTS_STALE_ALIVE_PID_MS = previous;
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
