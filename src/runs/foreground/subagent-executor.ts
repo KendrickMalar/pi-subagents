@@ -90,7 +90,7 @@ import {
 	resolveSubagentResultStatus,
 	stripDetailsOutputsForIntercomReceipt,
 } from "../../intercom/result-intercom.ts";
-import { applySteeringRecoveryAgentConfig, asyncReviveRequiresRecoveryDescriptor, buildRevivedAsyncTask, readAsyncRecoveryDescriptor, resolveAsyncResumeTarget, resolveAsyncRunLocation } from "../background/async-resume.ts";
+import { applySteeringRecoveryAgentConfig, asyncReviveRequiresRecoveryDescriptor, buildRevivedAsyncTask, readAsyncRecoveryDescriptor, recordAsyncRunOwnerTransfer, resolveAsyncResumeTarget, resolveAsyncRunLocation } from "../background/async-resume.ts";
 import { closeSteerInbox, consumeSteerRequests, deliverInterruptRequest, readRevivalBriefs, requestAsyncSteer, watchAsyncControlInbox, type SteerDeliveryMode, type SteerRequest } from "../background/control-channel.ts";
 import { createSteeringStatus, recordSteeringRequest, steeringStatus, updateSteeringTarget, waitForSteeringAction } from "../background/steering.ts";
 import { canQueueRetainedAsyncFollowUp, steerAsyncRun } from "./async-steering-action.ts";
@@ -336,6 +336,8 @@ export interface SubagentParamsLike {
 	merge?: unknown;
 	supersession?: unknown;
 	index?: number;
+	/** resume only: explicitly take over a finished async run owned by another session. */
+	takeOver?: boolean;
 	toolCallId?: string;
 	childId?: string;
 	view?: "fleet" | "transcript";
@@ -1052,7 +1054,7 @@ function isExactResumeError(error: unknown, source: "async" | "foreground", requ
 	return new RegExp(`\\b${source} run '${escapeRegExp(requested)}'`, "i").test(error.message);
 }
 
-function resolveResumeTarget(params: SubagentParamsLike, state: SubagentState, options: { asyncRequireSessionFile?: boolean; exactOnly?: boolean } = {}): ResumeSourceTarget {
+function resolveResumeTarget(params: SubagentParamsLike, state: SubagentState, options: { asyncRequireSessionFile?: boolean; exactOnly?: boolean; takeOver?: boolean } = {}): ResumeSourceTarget {
 	const requested = (params.id ?? params.runId)?.trim() ?? "";
 	let foregroundTarget: ForegroundResumeSourceTarget | undefined;
 	let foregroundError: unknown;
@@ -1074,6 +1076,7 @@ function resolveResumeTarget(params: SubagentParamsLike, state: SubagentState, o
 			...resolveAsyncResumeTarget(asyncParams, {}, compactOptional<NonNullable<Parameters<typeof resolveAsyncResumeTarget>[2]>>({
 				requireSessionFile: options.asyncRequireSessionFile,
 				sessionId: state.currentSessionId ?? undefined,
+				takeOver: options.takeOver,
 			})),
 		};
 	} catch (error) {
@@ -1938,7 +1941,7 @@ function resolveRequestedResumeTarget(params: SubagentParamsLike, deps: Executor
 		];
 		return resolveNestedResumeTarget(resolved, trustedSessionRoots, recoveredSessionContext(deps));
 	}
-	return resolveResumeTarget(params, deps.state, { asyncRequireSessionFile: false });
+	return resolveResumeTarget(params, deps.state, { asyncRequireSessionFile: false, takeOver: params.takeOver === true });
 }
 
 async function resumeAsyncRun(input: {
@@ -2020,6 +2023,14 @@ async function resumeAsyncRun(input: {
 	}
 
 	input.deps.state.currentSessionId = resolveCurrentSessionId(input.ctx.sessionManager);
+	if (target.source === "async" && target.ownerTransfer && target.asyncDir) {
+		try {
+			recordAsyncRunOwnerTransfer(target.asyncDir, target.ownerTransfer);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return { content: [{ type: "text", text: `Cannot take over async run '${target.runId}': ${message}` }], isError: true, details: { mode: "management", results: [] } };
+		}
+	}
 	const effectiveCwd = target.cwd ?? input.requestCwd;
 	const scope: AgentScope = resolveExecutionAgentScope(input.params.agentScope);
 	const discovered = input.deps.discoverAgents(effectiveCwd, scope, input.parentModel?.provider);

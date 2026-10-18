@@ -180,6 +180,7 @@ const SubagentParamProperties = {
 	merge: Type.Optional(Type.Unsafe({ type: "object", additionalProperties: true, description: "lane.recordMerge evidence; read guide tool-reference." })),
 	supersession: Type.Optional(Type.Unsafe({ type: "object", additionalProperties: true, description: "lane.recordSupersession evidence; read guide tool-reference." })),
 	index: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based child/transcript index." })),
+	takeOver: Type.Optional(Type.Boolean({ description: "resume: explicitly take over a finished async run owned by another (dead) session; never a running one." })),
 	childId: Type.Optional(Type.String({ minLength: 1, maxLength: 256, description: "Child-scoped stop identity." })),
 	toolCallId: Type.Optional(Type.String({ description: "Command tool-call id." })),
 	view: Type.Optional(Type.String({
